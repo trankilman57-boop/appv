@@ -1,10 +1,14 @@
 import json
 import os
+import ssl
+import time
 import threading
 import base64
 import urllib.request
 import urllib.error
 from datetime import date
+
+import certifi
 
 from kivy.app import App
 from kivy.lang import Builder
@@ -14,9 +18,14 @@ from kivy.uix.popup import Popup
 from kivy.metrics import dp
 from kivy.core.window import Window
 
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cave.json")
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-TEMP_PHOTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_label.jpg")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(APP_DIR, "cave.json")
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+TEMP_PHOTO = os.path.join(APP_DIR, "temp_label.jpg")
+PHOTOS_DIR = os.path.join(APP_DIR, "photos")
+os.makedirs(PHOTOS_DIR, exist_ok=True)
+
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 # ---------------------------------------------------------------------------
 # Persistence
@@ -98,8 +107,57 @@ STATUS_COLORS = {
 
 
 # ---------------------------------------------------------------------------
-# Android gallery picker (falls back gracefully off-device)
+# Android camera capture (falls back gracefully off-device)
 # ---------------------------------------------------------------------------
+
+def open_camera(on_captured, on_error):
+    """Opens the native camera app and saves the photo to TEMP_PHOTO.
+    Uses MediaStore insertion so no FileProvider/manifest changes are needed
+    (works on Android 10+; on very old versions it may fail and we surface
+    a clear error instead of crashing)."""
+    try:
+        from jnius import autoclass
+        from android import activity, mActivity  # noqa
+
+        Intent = autoclass('android.content.Intent')
+        MediaStore = autoclass('android.provider.MediaStore')
+        ContentValues = autoclass('android.content.ContentValues')
+        REQUEST_CODE = 4321
+
+        resolver = mActivity.getContentResolver()
+        values = ContentValues()
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, f"macave_{int(time.time())}.jpg")
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if uri is None:
+            on_error("Impossible de préparer le stockage pour la photo.")
+            return
+
+        def on_activity_result(request_code, result_code, intent):
+            if request_code != REQUEST_CODE:
+                return
+            try:
+                activity.unbind(on_activity_result=on_activity_result)
+                _save_uri_to_file(uri)
+                on_picked_mainthread(TEMP_PHOTO)
+            except Exception as e:
+                on_error_mainthread(f"Erreur lecture photo : {e}")
+
+        @mainthread
+        def on_picked_mainthread(path):
+            on_captured(path)
+
+        @mainthread
+        def on_error_mainthread(msg):
+            on_error(msg)
+
+        activity.bind(on_activity_result=on_activity_result)
+        intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        mActivity.startActivityForResult(intent, REQUEST_CODE)
+    except Exception as e:
+        on_error(f"Appareil photo indisponible sur cet appareil ({e}).")
+
 
 def pick_image_from_gallery(on_picked, on_error):
     try:
@@ -153,7 +211,7 @@ def _save_uri_to_file(uri):
 
 
 # ---------------------------------------------------------------------------
-# Anthropic API call (uses the user's own API key, stdlib only - no `requests`)
+# Gemini API (free tier) - stdlib only, with proper SSL cert bundle
 # ---------------------------------------------------------------------------
 
 PROMPT = """Tu es un sommelier expert. Analyse cette photo d'étiquette de vin et réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ni après, sans balises markdown, avec exactement ces clés :
@@ -169,6 +227,31 @@ PROMPT = """Tu es un sommelier expert. Analyse cette photo d'étiquette de vin e
   "note_ia": "une ou deux phrases sur le style du vin et la raison de cette fenêtre de garde"
 }
 Fais ta meilleure estimation d'expert plutôt que de laisser un champ vide, sauf pour le nom et le millésime où l'exactitude prime."""
+
+
+def test_api_key(api_key, on_success, on_error):
+    def worker():
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=20, context=SSL_CONTEXT) as resp:
+                json.loads(resp.read().decode("utf-8"))
+            on_success_mainthread()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore")
+            on_error_mainthread(f"Clé refusée ({e.code}) : {body[:150]}")
+        except Exception as e:
+            on_error_mainthread(f"Échec de connexion : {e}")
+
+    @mainthread
+    def on_success_mainthread():
+        on_success()
+
+    @mainthread
+    def on_error_mainthread(msg):
+        on_error(msg)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def analyze_label(image_path, api_key, on_success, on_error):
@@ -196,7 +279,7 @@ def analyze_label(image_path, api_key, on_success, on_error):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
             candidates = data.get("candidates", [])
@@ -357,9 +440,13 @@ class WineApp(App):
         add_card.add_widget(title)
 
         photo_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        photo_btn = Factory.PrimaryButton(text="Choisir une photo d'etiquette")
-        photo_btn.bind(on_release=lambda *_: self.pick_photo())
-        photo_row.add_widget(photo_btn)
+        camera_btn = Factory.PrimaryButton(text="Prendre une photo")
+        camera_btn.bind(on_release=lambda *_: self.take_photo())
+        photo_row.add_widget(camera_btn)
+        gallery_btn = Factory.PrimaryButton(text="Galerie")
+        gallery_btn.size_hint_x = 0.45
+        gallery_btn.bind(on_release=lambda *_: self.pick_photo())
+        photo_row.add_widget(gallery_btn)
         add_card.add_widget(photo_row)
 
         self.photo_status_label = Label(text="", size_hint_y=None, height=dp(20),
@@ -413,16 +500,24 @@ class WineApp(App):
     def build_bottle_card(self, bottle):
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.label import Label
+        from kivy.uix.image import Image as KivyImage
         from kivy.factory import Factory
 
         status, label = compute_status(bottle)
+        has_photo = bottle.get("photo_path") and os.path.exists(bottle["photo_path"])
+        card_height = dp(150) if not has_photo else dp(190)
 
-        outer = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(150))
+        outer = BoxLayout(orientation="horizontal", size_hint_y=None, height=card_height)
         bar = Factory.AccentBar()
         bar.bar_color = STATUS_COLORS[status]
         outer.add_widget(bar)
 
         card = Factory.RoundCard(orientation="vertical", padding=dp(12), spacing=dp(4))
+
+        if has_photo:
+            img = KivyImage(source=bottle["photo_path"], size_hint_y=None, height=dp(90),
+                             allow_stretch=True, keep_ratio=True)
+            card.add_widget(img)
 
         top = BoxLayout(size_hint_y=None, height=dp(26))
         name_lbl = Label(text=f'{bottle.get("nom","?")}', bold=True, font_size=dp(16),
@@ -472,6 +567,18 @@ class WineApp(App):
         return outer
 
     # -- photo picking / analysis -------------------------------------
+    def take_photo(self):
+        self.photo_status_label.text = "Ouverture de l'appareil photo..."
+
+        def on_captured(path):
+            self.pending_photo = path
+            self.photo_status_label.text = "Photo prete. Appuyez sur Analyser."
+
+        def on_error(msg):
+            self.photo_status_label.text = msg
+
+        open_camera(on_captured, on_error)
+
     def pick_photo(self):
         self.photo_status_label.text = "Ouverture de la galerie..."
 
@@ -518,6 +625,17 @@ class WineApp(App):
             return
         bottle = {k: ti.text.strip() for k, ti in self.inputs.items()}
         bottle["note_ia"] = self._pending_note_ia
+
+        # Keep the label photo permanently attached to this bottle's card
+        if self.pending_photo and os.path.exists(self.pending_photo):
+            permanent_path = os.path.join(PHOTOS_DIR, f"bottle_{int(time.time()*1000)}.jpg")
+            try:
+                with open(self.pending_photo, "rb") as src, open(permanent_path, "wb") as dst:
+                    dst.write(src.read())
+                bottle["photo_path"] = permanent_path
+            except Exception:
+                pass
+
         self.bottles.insert(0, bottle)
         save_bottles(self.bottles)
         for ti in self.inputs.values():
@@ -528,8 +646,14 @@ class WineApp(App):
         self.build_content()
 
     def remove_bottle(self, bottle):
+        photo_path = bottle.get("photo_path")
         self.bottles.remove(bottle)
         save_bottles(self.bottles)
+        if photo_path and os.path.exists(photo_path):
+            try:
+                os.remove(photo_path)
+            except Exception:
+                pass
         self.build_content()
 
     # -- settings popup ---------------------------------------------
@@ -547,16 +671,42 @@ class WineApp(App):
                      font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6), size_hint_y=None, height=dp(50))
         box.add_widget(info)
 
-        save_btn = Factory.PrimaryButton(text="Enregistrer")
-        box.add_widget(save_btn)
+        test_status = Label(text="", font_size=dp(12), color=(0.17, 0.13, 0.11, 0.8),
+                             size_hint_y=None, height=dp(30))
+        box.add_widget(test_status)
 
-        popup = Popup(title="Parametres", content=box, size_hint=(0.9, 0.5))
+        btn_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        test_btn = Factory.PrimaryButton(text="Tester la cle")
+        save_btn = Factory.PrimaryButton(text="Enregistrer")
+        btn_row.add_widget(test_btn)
+        btn_row.add_widget(save_btn)
+        box.add_widget(btn_row)
+
+        popup = Popup(title="Parametres", content=box, size_hint=(0.9, 0.55))
+
+        def do_test(*_):
+            key = key_input.text.strip()
+            if not key:
+                test_status.text = "Entrez d'abord une cle."
+                return
+            test_status.text = "Test en cours..."
+
+            def on_success():
+                test_status.text = "Cle valide, connexion OK."
+                test_status.color = (0.31, 0.35, 0.25, 1)
+
+            def on_error(msg):
+                test_status.text = msg
+                test_status.color = (0.66, 0.36, 0.23, 1)
+
+            test_api_key(key, on_success, on_error)
 
         def do_save(*_):
             self.settings["api_key"] = key_input.text.strip()
             save_settings(self.settings)
             popup.dismiss()
 
+        test_btn.bind(on_release=do_test)
         save_btn.bind(on_release=do_save)
         popup.open()
 
