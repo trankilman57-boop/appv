@@ -198,8 +198,8 @@ def open_camera(temp_path, on_captured, on_error):
 
         resolver = mActivity.getContentResolver()
         values = ContentValues()
-        values.put(MediaStoreImagesMedia.DISPLAY_NAME, f"macave_{int(time.time())}.jpg")
-        values.put(MediaStoreImagesMedia.MIME_TYPE, "image/jpeg")
+        values.put("_display_name", f"macave_{int(time.time())}.jpg")
+        values.put("mime_type", "image/jpeg")
         uri = resolver.insert(MediaStoreImagesMedia.EXTERNAL_CONTENT_URI, values)
         if uri is None:
             on_error("Impossible de préparer le stockage pour la photo.")
