@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: kivy/buildozer:latest
-      options: --user root
 
     steps:
       - name: Checkout code
