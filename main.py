@@ -192,14 +192,15 @@ def open_camera(temp_path, on_captured, on_error):
 
         Intent = autoclass('android.content.Intent')
         MediaStore = autoclass('android.provider.MediaStore')
+        MediaStoreImagesMedia = autoclass('android.provider.MediaStore$Images$Media')
         ContentValues = autoclass('android.content.ContentValues')
         REQUEST_CODE = 4321
 
         resolver = mActivity.getContentResolver()
         values = ContentValues()
-        values.put(MediaStore.Images.Media.DISPLAY_NAME, f"macave_{int(time.time())}.jpg")
-        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        values.put(MediaStoreImagesMedia.DISPLAY_NAME, f"macave_{int(time.time())}.jpg")
+        values.put(MediaStoreImagesMedia.MIME_TYPE, "image/jpeg")
+        uri = resolver.insert(MediaStoreImagesMedia.EXTERNAL_CONTENT_URI, values)
         if uri is None:
             on_error("Impossible de préparer le stockage pour la photo.")
             return
@@ -373,7 +374,7 @@ def analyze_label(image_paths, api_key, on_success, on_error):
             }
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.0-flash:generateContent?key={api_key}"
+                f"gemini-3.6-flash:generateContent?key={api_key}"
             )
             req = urllib.request.Request(
                 url,
