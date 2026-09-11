@@ -329,8 +329,8 @@ class WineApp(App):
         self.settings = load_settings()
         self.pending_photo = None
         self._pending_note_ia = ""
-        root = Builder.load_string(KV)
-        self.root_screen = root
+        Builder.load_string(KV)
+        self.root_screen = RootScreen()
         sm = ScreenManager()
         sm.add_widget(self.root_screen)
         self.build_content()
