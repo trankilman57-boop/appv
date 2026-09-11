@@ -17,7 +17,7 @@ fullscreen = 0
 android.accept_sdk_license = True
 p4a.branch = v2024.01.21
 
-android.permissions = INTERNET,CAMERA
+android.permissions = INTERNET,CAMERA,READ_MEDIA_IMAGES,READ_EXTERNAL_STORAGE
 
 # API/target Android versions (safe modern defaults as of 2026)
 android.api = 34
