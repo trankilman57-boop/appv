@@ -684,6 +684,8 @@ class WineApp(App):
         self.search_query = ""
         self.sort_mode = "Statut"
 
+        self._request_android_permissions()
+
         Builder.load_string(KV)
         self.root_screen = RootScreen(name="root")
         self.detail_screen = DetailScreen(name="detail")
@@ -695,6 +697,19 @@ class WineApp(App):
         sm.add_widget(self.form_screen)
         self.build_content()
         return sm
+
+    def _request_android_permissions(self):
+        try:
+            from android.permissions import request_permissions, Permission
+            perms = []
+            for name in ("CAMERA", "READ_MEDIA_IMAGES", "WRITE_EXTERNAL_STORAGE",
+                         "READ_EXTERNAL_STORAGE"):
+                p = getattr(Permission, name, None)
+                if p:
+                    perms.append(p)
+            request_permissions(perms)
+        except Exception as e:
+            print(f"Permissions non demandees (normal hors Android) : {e}")
 
     # -- root screen (list only) --------------------------------
     def build_content(self):
@@ -773,8 +788,10 @@ class WineApp(App):
         add_card.add_widget(photo_row)
 
         self.photo_status_label = Label(text=self._photo_status_text(), size_hint_y=None,
-                                         height=dp(20), font_size=dp(12),
-                                         color=(0.29, 0.07, 0.13, 1))
+                                         height=dp(40), font_size=dp(13), bold=True,
+                                         color=(0.29, 0.07, 0.13, 1), halign="left", valign="top")
+        self.photo_status_label.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+        self.photo_status_label.bind(texture_size=lambda w, v: setattr(w, "height", max(dp(20), v[1])))
         add_card.add_widget(self.photo_status_label)
 
         analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette (IA)")
@@ -1019,9 +1036,11 @@ class WineApp(App):
             else:
                 self.pending_photo = path
             self.photo_status_label.text = self._photo_status_text()
+            self.photo_status_label.color = (0.29, 0.07, 0.13, 1)
 
         def on_error(msg):
             self.photo_status_label.text = msg
+            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
 
         open_camera(target, on_captured, on_error)
 
@@ -1035,9 +1054,11 @@ class WineApp(App):
             else:
                 self.pending_photo = path
             self.photo_status_label.text = self._photo_status_text()
+            self.photo_status_label.color = (0.29, 0.07, 0.13, 1)
 
         def on_error(msg):
             self.photo_status_label.text = msg
+            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
 
         pick_image_from_gallery(target, on_picked, on_error)
 
