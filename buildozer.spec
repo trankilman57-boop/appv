@@ -15,6 +15,7 @@ fullscreen = 0
 # Add icon.filename = %(source.dir)s/icon.png once you have an icon ready
 
 android.accept_sdk_license = True
+p4a.branch = v2024.01.21
 
 android.permissions = INTERNET,CAMERA
 
