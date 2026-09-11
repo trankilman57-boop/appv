@@ -224,8 +224,9 @@ def open_camera(temp_path, on_captured, on_error):
             on_error(msg)
 
         activity.bind(on_activity_result=on_activity_result)
+        from jnius import cast
         intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-        intent.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        intent.putExtra(MediaStore.EXTRA_OUTPUT, cast('android.os.Parcelable', uri))
         mActivity.startActivityForResult(intent, REQUEST_CODE)
     except Exception as e:
         on_error(f"Appareil photo indisponible sur cet appareil ({e}).")
