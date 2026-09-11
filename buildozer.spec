@@ -14,6 +14,8 @@ fullscreen = 0
 
 # Add icon.filename = %(source.dir)s/icon.png once you have an icon ready
 
+android.accept_sdk_license = True
+
 android.permissions = INTERNET,CAMERA
 
 # API/target Android versions (safe modern defaults as of 2026)
