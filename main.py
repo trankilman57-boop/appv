@@ -19,7 +19,7 @@ from kivy.uix.popup import Popup
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.spinner import Spinner
 from kivy.uix.widget import Widget
-from kivy.graphics import Color, Rectangle
+from kivy.graphics import Color, Rectangle, RoundedRectangle
 from kivy.metrics import dp
 from kivy.core.window import Window
 
@@ -111,6 +111,16 @@ STATUS_COLORS = {
     "unknown": (0.6, 0.6, 0.6, 1),
 }
 STATUS_ORDER = {"now": 0, "wait": 1, "late": 2, "unknown": 3}
+STATUS_SHORT = {"now": "Pret", "wait": "Attendre", "late": "Passe", "unknown": "?"}
+
+
+def compute_benefice(bottle):
+    try:
+        paye = float(bottle.get("prix_paye") or "")
+        estime = float(bottle.get("prix_estime") or "")
+    except (ValueError, TypeError):
+        return None
+    return round(estime - paye, 2)
 
 TYPE_OPTIONS = ["Rouge", "Blanc", "Rose", "Petillant", "Autre"]
 TYPE_COLORS = {
@@ -464,6 +474,20 @@ KV = """
 
 <CardButton@ButtonBehavior+BoxLayout>:
 
+<ClipBox@BoxLayout>:
+    canvas.before:
+        StencilPush
+        Rectangle:
+            pos: self.pos
+            size: self.size
+        StencilUse
+    canvas.after:
+        StencilUnUse
+        Rectangle:
+            pos: self.pos
+            size: self.size
+        StencilPop
+
 <RootScreen>:
     canvas.before:
         Color:
@@ -598,8 +622,10 @@ class DetailScreen(Screen):
             p = bottle.get(key)
             if p and os.path.exists(p):
                 has_any_photo = True
+                clip = Factory.ClipBox()
                 img = KivyImage(source=p, allow_stretch=True, keep_ratio=True)
-                photo_row.add_widget(img)
+                clip.add_widget(img)
+                photo_row.add_widget(clip)
         if has_any_photo:
             content.add_widget(photo_row)
 
@@ -653,6 +679,15 @@ class DetailScreen(Screen):
             box.add_widget(Label(text=f'{bottle["prix_estime"]} EUR', bold=True, font_size=dp(20),
                                   color=(0.69, 0.54, 0.31, 1)))
             box.add_widget(Label(text="Estime (marche)", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
+            price_row.add_widget(box)
+        benefice = compute_benefice(bottle)
+        if benefice is not None:
+            sign = "+" if benefice >= 0 else ""
+            bcolor = (0.31, 0.35, 0.25, 1) if benefice >= 0 else (0.66, 0.36, 0.23, 1)
+            box = BoxLayout(orientation="vertical")
+            box.add_widget(Label(text=f'{sign}{benefice:g} EUR', bold=True, font_size=dp(20),
+                                  color=bcolor))
+            box.add_widget(Label(text="Plus-value", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
             price_row.add_widget(box)
         content.add_widget(price_row)
 
@@ -941,67 +976,87 @@ class WineApp(App):
         from kivy.uix.image import Image as KivyImage
         from kivy.factory import Factory
 
-        status, label = compute_status(bottle)
+        status, status_label = compute_status(bottle)
         has_photo = bottle.get("photo_path") and os.path.exists(bottle["photo_path"])
-        card_height = dp(150) if not has_photo else dp(190)
 
-        outer = Factory.CardButton(orientation="horizontal", size_hint_y=None, height=card_height)
+        outer = Factory.CardButton(orientation="horizontal", size_hint_y=None, height=dp(86))
         outer.bind(on_release=lambda *_: self.open_detail(bottle))
-        bar = Factory.AccentBar()
-        bar.bar_color = STATUS_COLORS[status]
-        outer.add_widget(bar)
 
-        card = Factory.RoundCard(orientation="vertical", padding=dp(12), spacing=dp(4))
+        card = Factory.RoundCard(orientation="horizontal", padding=dp(10), spacing=dp(10))
 
+        thumb = Factory.ClipBox(size_hint_x=None, width=dp(64))
         if has_photo:
-            img = KivyImage(source=bottle["photo_path"], size_hint_y=None, height=dp(90),
-                             allow_stretch=True, keep_ratio=True)
-            card.add_widget(img)
+            img = KivyImage(source=bottle["photo_path"], allow_stretch=True, keep_ratio=True)
+            thumb.add_widget(img)
+        else:
+            ph_color = TYPE_COLORS.get(bottle.get("type") or "Autre", (0.6, 0.6, 0.6, 1))
+            with thumb.canvas.before:
+                Color(*ph_color)
+                ph_rect = Rectangle(pos=thumb.pos, size=thumb.size)
+            thumb.bind(pos=lambda w, v: setattr(ph_rect, "pos", v),
+                       size=lambda w, v: setattr(ph_rect, "size", v))
+        card.add_widget(thumb)
 
-        top = BoxLayout(size_hint_y=None, height=dp(26))
-        name_lbl = Label(text=f'{bottle.get("nom","?")}', bold=True, font_size=dp(16),
-                          color=(0.17, 0.13, 0.11, 1), halign="left", valign="middle")
+        info = BoxLayout(orientation="vertical", spacing=dp(3))
+
+        top_row = BoxLayout(size_hint_y=None, height=dp(22))
+        name_lbl = Label(text=bottle.get("nom", "?"), font_size=dp(15), bold=True,
+                          color=(0.17, 0.13, 0.11, 1), halign="left", valign="middle",
+                          shorten=True, shorten_from="right")
         name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        top.add_widget(name_lbl)
-        millesime_lbl = Label(text=bottle.get("millesime", "") or "", bold=True,
-                               font_size=dp(18), color=(0.29, 0.07, 0.13, 1),
-                               size_hint_x=None, width=dp(60))
-        top.add_widget(millesime_lbl)
-        del_btn = Factory.GhostButton(text="X", size_hint_x=None, width=dp(36))
+        top_row.add_widget(name_lbl)
+        year_lbl = Label(text=bottle.get("millesime", "") or "-", font_size=dp(15), bold=True,
+                          color=(0.29, 0.07, 0.13, 1), size_hint_x=None, width=dp(46),
+                          halign="right", valign="middle")
+        year_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        top_row.add_widget(year_lbl)
+        del_btn = Factory.GhostButton(text="X", size_hint_x=None, width=dp(28), height=dp(22),
+                                       font_size=dp(12))
         del_btn.bind(on_release=lambda *_: self.remove_bottle(bottle))
-        top.add_widget(del_btn)
-        card.add_widget(top)
+        top_row.add_widget(del_btn)
+        info.add_widget(top_row)
 
         meta = f'{bottle.get("appellation","")}  ·  {bottle.get("cepage","")}'
-        meta_lbl = Label(text=meta, font_size=dp(12), color=(0.17, 0.13, 0.11, 0.7),
-                          size_hint_y=None, height=dp(20), halign="left", valign="middle")
+        meta_lbl = Label(text=meta, font_size=dp(11.5), color=(0.17, 0.13, 0.11, 0.65),
+                          size_hint_y=None, height=dp(16), halign="left", valign="middle",
+                          shorten=True, shorten_from="right")
         meta_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        card.add_widget(meta_lbl)
+        info.add_widget(meta_lbl)
 
-        prix = []
-        if bottle.get("prix_paye"):
-            prix.append(f'Paye: {bottle["prix_paye"]} EUR')
-        if bottle.get("prix_estime"):
-            prix.append(f'Estime: {bottle["prix_estime"]} EUR')
-        prix_lbl = Label(text="  ·  ".join(prix), font_size=dp(12),
-                          color=(0.17, 0.13, 0.11, 0.85), size_hint_y=None, height=dp(20),
-                          halign="left", valign="middle")
-        prix_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        card.add_widget(prix_lbl)
+        bottom_row = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
 
-        status_lbl = Label(text=label, font_size=dp(13), bold=True,
-                            color=STATUS_COLORS[status], size_hint_y=None, height=dp(22),
-                            halign="left", valign="middle")
-        status_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        card.add_widget(status_lbl)
+        badge = Label(text=STATUS_SHORT[status], font_size=dp(10.5), bold=True,
+                      color=(1, 1, 1, 1), size_hint=(None, None), size=(dp(72), dp(20)))
+        with badge.canvas.before:
+            Color(*STATUS_COLORS[status])
+            badge_rect = RoundedRectangle(pos=badge.pos, size=badge.size, radius=[dp(10)])
+        badge.bind(pos=lambda w, v: setattr(badge_rect, "pos", v),
+                   size=lambda w, v: setattr(badge_rect, "size", v))
+        bottom_row.add_widget(badge)
 
-        if bottle.get("note_ia"):
-            note_lbl = Label(text=bottle["note_ia"], font_size=dp(11),
-                              color=(0.17, 0.13, 0.11, 0.65), size_hint_y=None, height=dp(30),
-                              halign="left", valign="top")
-            note_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-            card.add_widget(note_lbl)
+        bottom_row.add_widget(BoxLayout())  # spacer
 
+        benefice = compute_benefice(bottle)
+        if benefice is not None:
+            sign = "+" if benefice >= 0 else ""
+            color = (0.31, 0.35, 0.25, 1) if benefice >= 0 else (0.66, 0.36, 0.23, 1)
+            price_txt = f"{sign}{benefice:g} EUR"
+        elif bottle.get("prix_estime"):
+            color = (0.17, 0.13, 0.11, 0.8)
+            price_txt = f'{bottle["prix_estime"]} EUR (estime)'
+        elif bottle.get("prix_paye"):
+            color = (0.17, 0.13, 0.11, 0.8)
+            price_txt = f'{bottle["prix_paye"]} EUR (paye)'
+        else:
+            color = (0.17, 0.13, 0.11, 0.4)
+            price_txt = ""
+        price_lbl = Label(text=price_txt, font_size=dp(13), bold=True, color=color,
+                           size_hint_x=None, halign="right", valign="middle")
+        price_lbl.bind(texture_size=lambda w, v: setattr(w, "width", v[0]))
+        bottom_row.add_widget(price_lbl)
+
+        info.add_widget(bottom_row)
+        card.add_widget(info)
         outer.add_widget(card)
         return outer
 
