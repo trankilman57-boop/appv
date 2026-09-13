@@ -13,7 +13,7 @@ import certifi
 
 from kivy.app import App
 from kivy.lang import Builder
-from kivy.clock import mainthread
+from kivy.clock import mainthread, Clock
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.popup import Popup
 from kivy.uix.behaviors import ButtonBehavior
@@ -282,11 +282,33 @@ def _save_uri_to_file(uri, dest_path):
     BitmapFactory = autoclass('android.graphics.BitmapFactory')
     CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
     FileOutputStream = autoclass('java.io.FileOutputStream')
+    Bitmap = autoclass('android.graphics.Bitmap')
+    Matrix = autoclass('android.graphics.Matrix')
+    ExifInterface = autoclass('android.media.ExifInterface')
 
     resolver = mActivity.getContentResolver()
+
     input_stream = resolver.openInputStream(uri)
     bitmap = BitmapFactory.decodeStream(input_stream)
     input_stream.close()
+
+    orientation = ExifInterface.ORIENTATION_NORMAL
+    try:
+        exif_stream = resolver.openInputStream(uri)
+        exif = ExifInterface(exif_stream)
+        orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        exif_stream.close()
+    except Exception:
+        pass
+
+    ROTATE_90 = 6
+    ROTATE_180 = 3
+    ROTATE_270 = 8
+    angle = {ROTATE_90: 90, ROTATE_180: 180, ROTATE_270: 270}.get(orientation)
+    if angle:
+        matrix = Matrix()
+        matrix.postRotate(angle)
+        bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, True)
 
     out = FileOutputStream(dest_path)
     bitmap.compress(CompressFormat.JPEG, 85, out)
@@ -488,27 +510,65 @@ KV = """
             size: self.size
         StencilPop
 
-<RootScreen>:
+<PhotoBg@FloatLayout>:
+    Image:
+        source: 'assets/vineyard_bg.jpg'
+        allow_stretch: True
+        keep_ratio: False
+        size: self.parent.size
+        pos: self.parent.pos
+    Widget:
+        size: self.parent.size
+        pos: self.parent.pos
+        canvas:
+            Color:
+                rgba: 0.945, 0.914, 0.859, 0.86
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+<SplashScreen>:
     FloatLayout:
         size: root.size
         pos: root.pos
-
         Image:
             source: 'assets/vineyard_bg.jpg'
             allow_stretch: True
             keep_ratio: False
             size: root.size
             pos: root.pos
-
         Widget:
             size: root.size
             pos: root.pos
             canvas:
                 Color:
-                    rgba: 0.945, 0.914, 0.859, 0.86
+                    rgba: 0.13, 0.09, 0.04, 0.38
                 Rectangle:
                     pos: self.pos
                     size: self.size
+        BoxLayout:
+            orientation: 'vertical'
+            size: root.size
+            pos: root.pos
+            padding: dp(24)
+            Widget:
+            Label:
+                text: 'Ma Cave'
+                font_size: dp(40)
+                bold: True
+                color: 1, 0.96, 0.9, 1
+                size_hint_y: None
+                height: dp(60)
+            Label:
+                text: 'Suivi de cave a vin'
+                font_size: dp(15)
+                color: 1, 0.96, 0.9, 0.85
+                size_hint_y: None
+                height: dp(24)
+            Widget:
+
+<RootScreen>:
+    PhotoBg:
 
         BoxLayout:
             orientation: 'vertical'
@@ -551,37 +611,38 @@ KV = """
                     padding: [0, 0, 0, dp(80)]
 
 <FormScreen>:
-    canvas.before:
-        Color:
-            rgba: 0.945, 0.914, 0.859, 1
-        Rectangle:
-            pos: self.pos
-            size: self.size
-
-    BoxLayout:
-        orientation: 'vertical'
-        padding: dp(16)
-        spacing: dp(12)
+    PhotoBg:
 
         BoxLayout:
-            size_hint_y: None
-            height: dp(46)
-            GhostButton:
-                text: '< Retour'
-                size_hint_x: None
-                width: dp(100)
-                on_release: root.go_back()
+            orientation: 'vertical'
+            padding: dp(16)
+            spacing: dp(12)
+            size: root.size
+            pos: root.pos
 
-        ScrollView:
-            do_scroll_x: False
             BoxLayout:
-                id: form_content
-                orientation: 'vertical'
                 size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(8)
-                padding: [0, 0, 0, dp(80)]
+                height: dp(46)
+                GhostButton:
+                    text: '< Retour'
+                    size_hint_x: None
+                    width: dp(100)
+                    on_release: root.go_back()
+
+            ScrollView:
+                do_scroll_x: False
+                BoxLayout:
+                    id: form_content
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(8)
+                    padding: [0, 0, 0, dp(80)]
 """
+
+
+class SplashScreen(Screen):
+    pass
 
 
 class RootScreen(Screen):
@@ -600,6 +661,7 @@ class FormScreen(Screen):
 class DetailScreen(Screen):
     def show_bottle(self, bottle):
         from kivy.uix.boxlayout import BoxLayout
+        from kivy.uix.floatlayout import FloatLayout
         from kivy.uix.scrollview import ScrollView
         from kivy.uix.label import Label
         from kivy.uix.image import Image as KivyImage
@@ -609,11 +671,26 @@ class DetailScreen(Screen):
         self.clear_widgets()
         status, status_label = compute_status(bottle)
 
+        outer_bg = FloatLayout()
+        bg_img = KivyImage(source='assets/vineyard_bg.jpg', allow_stretch=True, keep_ratio=False,
+                            size=outer_bg.size, pos=outer_bg.pos)
+        outer_bg.bind(size=lambda w, v: setattr(bg_img, "size", v),
+                       pos=lambda w, v: setattr(bg_img, "pos", v))
+        outer_bg.add_widget(bg_img)
+        overlay = Widget(size=outer_bg.size, pos=outer_bg.pos)
+        with overlay.canvas:
+            Color(0.945, 0.914, 0.859, 0.86)
+            overlay_rect = Rectangle(pos=overlay.pos, size=overlay.size)
+        overlay.bind(pos=lambda w, v: setattr(overlay_rect, "pos", v),
+                     size=lambda w, v: setattr(overlay_rect, "size", v))
+        outer_bg.bind(size=lambda w, v: setattr(overlay, "size", v),
+                      pos=lambda w, v: setattr(overlay, "pos", v))
+        outer_bg.add_widget(overlay)
+
         root = BoxLayout(orientation="vertical")
-        with root.canvas.before:
-            Color(0.945, 0.914, 0.859, 1)
-            bg = Rectangle(pos=root.pos, size=root.size)
-        root.bind(pos=lambda w, v: setattr(bg, "pos", v), size=lambda w, v: setattr(bg, "size", v))
+        outer_bg.add_widget(root)
+        outer_bg.bind(size=lambda w, v: setattr(root, "size", v),
+                      pos=lambda w, v: setattr(root, "pos", v))
 
         top_bar = BoxLayout(size_hint_y=None, height=dp(50), padding=[dp(8), 0], spacing=dp(6))
         back_btn = Factory.GhostButton(text="< Retour", size_hint_x=None, width=dp(90))
@@ -722,7 +799,7 @@ class DetailScreen(Screen):
 
         scroll.add_widget(content)
         root.add_widget(scroll)
-        self.add_widget(root)
+        self.add_widget(outer_bg)
 
 
 class WineApp(App):
@@ -741,15 +818,18 @@ class WineApp(App):
         self._request_android_permissions()
 
         Builder.load_string(KV)
+        self.splash_screen = SplashScreen(name="splash")
         self.root_screen = RootScreen(name="root")
         self.detail_screen = DetailScreen(name="detail")
         self.form_screen = FormScreen(name="form")
         sm = ScreenManager()
         self.sm = sm
+        sm.add_widget(self.splash_screen)
         sm.add_widget(self.root_screen)
         sm.add_widget(self.detail_screen)
         sm.add_widget(self.form_screen)
         self.build_content()
+        Clock.schedule_once(lambda dt: setattr(self.sm, "current", "root"), 1.8)
         return sm
 
     def _request_android_permissions(self):
@@ -850,7 +930,7 @@ class WineApp(App):
 
         analyze_btn = None
         if self.editing_bottle:
-            analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette (IA)")
+            analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette")
             analyze_btn.bind(on_release=lambda *_: self.analyze_photo())
             add_card.add_widget(analyze_btn)
 
