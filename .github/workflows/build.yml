@@ -15,6 +15,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install fixed debug keystore
+        run: |
+          mkdir -p /github/home/.android
+          cp debug.keystore /github/home/.android/debug.keystore
+
       - name: Build APK with Buildozer
         run: buildozer android debug
 
