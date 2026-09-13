@@ -105,7 +105,7 @@ def compute_status(bottle):
 
 
 STATUS_COLORS = {
-    "now": (0.31, 0.35, 0.25, 1),
+    "now": (0.42, 0.52, 0.28, 1),
     "wait": (0.69, 0.54, 0.31, 1),
     "late": (0.66, 0.36, 0.23, 1),
     "unknown": (0.6, 0.6, 0.6, 1),
@@ -451,7 +451,7 @@ KV = """
 <StyledInput@TextInput>:
     background_color: 1, 1, 1, 1
     foreground_color: 0.17, 0.13, 0.11, 1
-    cursor_color: 0.29, 0.07, 0.13, 1
+    cursor_color: 0.55, 0.33, 0.10, 1
     padding: [dp(10), dp(10), dp(10), dp(10)]
     size_hint_y: None
     height: dp(44)
@@ -459,7 +459,7 @@ KV = """
 
 <PrimaryButton@Button>:
     background_normal: ''
-    background_color: 0.29, 0.07, 0.13, 1
+    background_color: 0.55, 0.33, 0.10, 1
     color: 0.945, 0.914, 0.859, 1
     bold: True
     size_hint_y: None
@@ -468,7 +468,7 @@ KV = """
 <GhostButton@Button>:
     background_normal: ''
     background_color: 0, 0, 0, 0
-    color: 0.29, 0.07, 0.13, 1
+    color: 0.55, 0.33, 0.10, 1
     size_hint_y: None
     height: dp(36)
 
@@ -489,50 +489,66 @@ KV = """
         StencilPop
 
 <RootScreen>:
-    canvas.before:
-        Color:
-            rgba: 0.945, 0.914, 0.859, 1
-        Rectangle:
-            pos: self.pos
-            size: self.size
+    FloatLayout:
+        size: root.size
+        pos: root.pos
 
-    BoxLayout:
-        orientation: 'vertical'
-        padding: dp(16)
-        spacing: dp(12)
+        Image:
+            source: 'assets/vineyard_bg.jpg'
+            allow_stretch: True
+            keep_ratio: False
+            size: root.size
+            pos: root.pos
+
+        Widget:
+            size: root.size
+            pos: root.pos
+            canvas:
+                Color:
+                    rgba: 0.945, 0.914, 0.859, 0.86
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
 
         BoxLayout:
-            size_hint_y: None
-            height: dp(56)
-            Label:
-                text: 'Ma Cave'
-                font_size: dp(28)
-                bold: True
-                color: 0.29, 0.07, 0.13, 1
-                halign: 'left'
-                valign: 'middle'
-                text_size: self.size
-            GhostButton:
-                text: 'Cle API'
-                size_hint_x: None
-                width: dp(90)
-                on_release: root.open_settings()
-            PrimaryButton:
-                text: '+ Ajouter'
-                size_hint_x: None
-                width: dp(110)
-                height: dp(40)
-                on_release: root.open_add()
+            orientation: 'vertical'
+            padding: dp(16)
+            spacing: dp(12)
+            size: root.size
+            pos: root.pos
 
-        ScrollView:
-            do_scroll_x: False
             BoxLayout:
-                id: content
-                orientation: 'vertical'
                 size_hint_y: None
-                height: self.minimum_height
-                spacing: dp(14)
-                padding: [0, 0, 0, dp(80)]
+                height: dp(56)
+                Label:
+                    text: 'Ma Cave'
+                    font_size: dp(28)
+                    bold: True
+                    color: 0.55, 0.33, 0.10, 1
+                    halign: 'left'
+                    valign: 'middle'
+                    text_size: self.size
+                GhostButton:
+                    text: 'Cle API'
+                    size_hint_x: None
+                    width: dp(90)
+                    on_release: root.open_settings()
+                PrimaryButton:
+                    text: '+ Ajouter'
+                    size_hint_x: None
+                    width: dp(110)
+                    height: dp(40)
+                    on_release: root.open_add()
+
+            ScrollView:
+                do_scroll_x: False
+                BoxLayout:
+                    id: content
+                    orientation: 'vertical'
+                    size_hint_y: None
+                    height: self.minimum_height
+                    spacing: dp(14)
+                    padding: [0, 0, 0, dp(80)]
 
 <FormScreen>:
     canvas.before:
@@ -630,7 +646,7 @@ class DetailScreen(Screen):
             content.add_widget(photo_row)
 
         name_lbl = Label(text=bottle.get("nom", "?"), bold=True, font_size=dp(24),
-                          color=(0.29, 0.07, 0.13, 1), size_hint_y=None, height=dp(36),
+                          color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(36),
                           halign="left", valign="middle")
         name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         content.add_widget(name_lbl)
@@ -656,7 +672,7 @@ class DetailScreen(Screen):
         content.add_widget(chip_row)
 
         millesime_lbl = Label(text=f'Millesime {bottle.get("millesime","?")}', font_size=dp(16),
-                               color=(0.29, 0.07, 0.13, 1), bold=True, size_hint_y=None,
+                               color=(0.55, 0.33, 0.10, 1), bold=True, size_hint_y=None,
                                height=dp(26), halign="left", valign="middle")
         millesime_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         content.add_widget(millesime_lbl)
@@ -671,7 +687,7 @@ class DetailScreen(Screen):
         if bottle.get("prix_paye"):
             box = BoxLayout(orientation="vertical")
             box.add_widget(Label(text=f'{bottle["prix_paye"]} EUR', bold=True, font_size=dp(20),
-                                  color=(0.29, 0.07, 0.13, 1)))
+                                  color=(0.55, 0.33, 0.10, 1)))
             box.add_widget(Label(text="Paye", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
             price_row.add_widget(box)
         if bottle.get("prix_estime"):
@@ -693,7 +709,7 @@ class DetailScreen(Screen):
 
         if bottle.get("note_ia"):
             note_title = Label(text="Note du sommelier", bold=True, font_size=dp(14),
-                                color=(0.29, 0.07, 0.13, 1), size_hint_y=None, height=dp(24),
+                                color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(24),
                                 halign="left", valign="middle")
             note_title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
             content.add_widget(note_title)
@@ -717,6 +733,7 @@ class WineApp(App):
         self.pending_photo = None
         self.pending_photo_back = None
         self._pending_note_ia = ""
+        self.analysis_result = None
         self.editing_bottle = None
         self.search_query = ""
         self.sort_mode = "Statut"
@@ -773,7 +790,7 @@ class WineApp(App):
         content.add_widget(search_row)
 
         section = Label(text=f"La cave ({len(self.bottles)})", bold=True, font_size=dp(20),
-                         color=(0.29, 0.07, 0.13, 1), size_hint_y=None, height=dp(30),
+                         color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(30),
                          halign="left", valign="middle")
         section.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         content.add_widget(section)
@@ -799,7 +816,7 @@ class WineApp(App):
 
         title_text = "Modifier la bouteille" if self.editing_bottle else "Ajouter une bouteille"
         title = Label(text=title_text, bold=True, font_size=dp(19),
-                       color=(0.29, 0.07, 0.13, 1), size_hint_y=None, height=dp(30),
+                       color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(30),
                        halign="left", valign="middle")
         title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         add_card.add_widget(title)
@@ -826,16 +843,18 @@ class WineApp(App):
 
         self.photo_status_label = Label(text=self._photo_status_text(), size_hint_y=None,
                                          height=dp(40), font_size=dp(13), bold=True,
-                                         color=(0.29, 0.07, 0.13, 1), halign="left", valign="top")
+                                         color=(0.55, 0.33, 0.10, 1), halign="left", valign="top")
         self.photo_status_label.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
         self.photo_status_label.bind(texture_size=lambda w, v: setattr(w, "height", max(dp(20), v[1])))
         add_card.add_widget(self.photo_status_label)
 
-        analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette (IA)")
-        analyze_btn.bind(on_release=lambda *_: self.analyze_photo())
-        add_card.add_widget(analyze_btn)
+        analyze_btn = None
+        if self.editing_bottle:
+            analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette (IA)")
+            analyze_btn.bind(on_release=lambda *_: self.analyze_photo())
+            add_card.add_widget(analyze_btn)
 
-        type_label = Label(text="Type de vin", font_size=dp(12), color=(0.29, 0.07, 0.13, 0.7),
+        type_label = Label(text="Type de vin", font_size=dp(12), color=(0.55, 0.33, 0.10, 0.7),
                             size_hint_y=None, height=dp(18), halign="left", valign="middle")
         type_label.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         add_card.add_widget(type_label)
@@ -844,21 +863,33 @@ class WineApp(App):
                                      color=(0.17, 0.13, 0.11, 1))
         add_card.add_widget(self.type_spinner)
 
+        show_preview = (not self.editing_bottle) and self.analysis_result
+
         self.inputs = {}
-        for key, hint in [
-            ("nom", "Nom du vin / domaine"),
-            ("appellation", "Appellation"),
-            ("millesime", "Millesime"),
-            ("cepage", "Cepage"),
-            ("region", "Region"),
-            ("garde_min", "Garde min (ans)"),
-            ("garde_max", "Garde max (ans)"),
-            ("prix_paye", "Prix paye (EUR)"),
-            ("prix_estime", "Prix estime (EUR)"),
-        ]:
-            ti = Factory.StyledInput(hint_text=hint)
-            self.inputs[key] = ti
-            add_card.add_widget(ti)
+        if show_preview:
+            preview_box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(3))
+            preview_box.bind(minimum_height=preview_box.setter("height"))
+            self.build_analysis_preview(preview_box)
+            add_card.add_widget(preview_box)
+
+            prix_paye_input = Factory.StyledInput(hint_text="Prix paye (EUR)")
+            self.inputs["prix_paye"] = prix_paye_input
+            add_card.add_widget(prix_paye_input)
+        else:
+            for key, hint in [
+                ("nom", "Nom du vin / domaine"),
+                ("appellation", "Appellation"),
+                ("millesime", "Millesime"),
+                ("cepage", "Cepage"),
+                ("region", "Region"),
+                ("garde_min", "Garde min (ans)"),
+                ("garde_max", "Garde max (ans)"),
+                ("prix_paye", "Prix paye (EUR)"),
+                ("prix_estime", "Prix estime (EUR)"),
+            ]:
+                ti = Factory.StyledInput(hint_text=hint)
+                self.inputs[key] = ti
+                add_card.add_widget(ti)
 
         save_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
         save_text = "Enregistrer les modifications" if self.editing_bottle else "Ajouter a la cave"
@@ -877,6 +908,43 @@ class WineApp(App):
             for key, ti in self.inputs.items():
                 ti.text = str(self.editing_bottle.get(key, "") or "")
             self.type_spinner.text = self.editing_bottle.get("type", "Rouge")
+
+    def build_analysis_preview(self, container):
+        from kivy.uix.label import Label
+
+        a = self.analysis_result
+
+        def row(label_text, value):
+            if not value:
+                return
+            lbl = Label(text=f"{label_text} : {value}", font_size=dp(13),
+                        color=(0.17, 0.13, 0.11, 0.85), size_hint_y=None, height=dp(22),
+                        halign="left", valign="middle")
+            lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+            container.add_widget(lbl)
+
+        name_lbl = Label(text=str(a.get("nom") or "?"), bold=True, font_size=dp(18),
+                          color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(28),
+                          halign="left", valign="middle")
+        name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
+        container.add_widget(name_lbl)
+
+        row("Appellation", a.get("appellation"))
+        row("Millesime", a.get("millesime"))
+        row("Cepage", a.get("cepage"))
+        row("Region", a.get("region"))
+        if a.get("garde_min") or a.get("garde_max"):
+            row("Garde", f'{a.get("garde_min") or "?"}-{a.get("garde_max") or "?"} ans')
+        if a.get("prix_estime"):
+            row("Prix estime", f'{a["prix_estime"]} EUR')
+
+        if a.get("note_ia"):
+            note_lbl = Label(text=str(a["note_ia"]), font_size=dp(12),
+                              color=(0.17, 0.13, 0.11, 0.7), size_hint_y=None,
+                              halign="left", valign="top")
+            note_lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+            note_lbl.bind(texture_size=lambda w, v: setattr(w, "height", v[1]))
+            container.add_widget(note_lbl)
 
     def _photo_status_text(self):
         front = "pret" if self.pending_photo and os.path.exists(self.pending_photo) else "manquant"
@@ -900,13 +968,13 @@ class WineApp(App):
 
         if not self.bottles:
             empty = Label(text="Aucune bouteille pour l'instant.", size_hint_y=None,
-                           height=dp(60), color=(0.29, 0.07, 0.13, 0.6))
+                           height=dp(60), color=(0.55, 0.33, 0.10, 0.6))
             self.list_container.add_widget(empty)
             return
 
         if not ordered:
             empty = Label(text="Aucun resultat pour cette recherche.", size_hint_y=None,
-                           height=dp(60), color=(0.29, 0.07, 0.13, 0.6))
+                           height=dp(60), color=(0.55, 0.33, 0.10, 0.6))
             self.list_container.add_widget(empty)
             return
 
@@ -930,7 +998,7 @@ class WineApp(App):
                                   height=dp(90) + extra_lines * dp(20),
                                   padding=dp(12), spacing=dp(4))
         title = Label(text="Profil de la cave", bold=True, font_size=dp(14),
-                      color=(0.29, 0.07, 0.13, 1), size_hint_y=None, height=dp(20),
+                      color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(20),
                       halign="left", valign="middle")
         title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         card.add_widget(title)
@@ -1006,7 +1074,7 @@ class WineApp(App):
         name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         top_row.add_widget(name_lbl)
         year_lbl = Label(text=bottle.get("millesime", "") or "-", font_size=dp(15), bold=True,
-                          color=(0.29, 0.07, 0.13, 1), size_hint_x=None, width=dp(46),
+                          color=(0.55, 0.33, 0.10, 1), size_hint_x=None, width=dp(46),
                           halign="right", valign="middle")
         year_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         top_row.add_widget(year_lbl)
@@ -1071,6 +1139,7 @@ class WineApp(App):
 
     def start_edit(self, bottle):
         self.editing_bottle = bottle
+        self.analysis_result = None
         self.build_form_content()
         self.pending_photo = bottle.get("photo_path")
         self.pending_photo_back = bottle.get("photo_path_back")
@@ -1093,7 +1162,9 @@ class WineApp(App):
             else:
                 self.pending_photo = path
             self.photo_status_label.text = self._photo_status_text()
-            self.photo_status_label.color = (0.29, 0.07, 0.13, 1)
+            self.photo_status_label.color = (0.55, 0.33, 0.10, 1)
+            if self.editing_bottle is None and self.pending_photo:
+                self.analyze_photo()
 
         def on_error(msg):
             self.photo_status_label.text = msg
@@ -1111,7 +1182,9 @@ class WineApp(App):
             else:
                 self.pending_photo = path
             self.photo_status_label.text = self._photo_status_text()
-            self.photo_status_label.color = (0.29, 0.07, 0.13, 1)
+            self.photo_status_label.color = (0.55, 0.33, 0.10, 1)
+            if self.editing_bottle is None and self.pending_photo:
+                self.analyze_photo()
 
         def on_error(msg):
             self.photo_status_label.text = msg
@@ -1131,17 +1204,37 @@ class WineApp(App):
         self.photo_status_label.text = "Analyse en cours..."
 
         def on_success(parsed):
-            self.photo_status_label.text = "Analyse terminee."
-            mapping = ["nom", "appellation", "millesime", "cepage", "region",
-                       "garde_min", "garde_max", "prix_estime"]
-            for key in mapping:
-                val = parsed.get(key)
-                if val not in (None, ""):
-                    self.inputs[key].text = str(val)
-            self._pending_note_ia = parsed.get("note_ia", "")
+            if self.editing_bottle is not None:
+                self.photo_status_label.text = "Analyse terminee."
+                mapping = ["nom", "appellation", "millesime", "cepage", "region",
+                           "garde_min", "garde_max", "prix_estime"]
+                for key in mapping:
+                    val = parsed.get(key)
+                    if val not in (None, ""):
+                        self.inputs[key].text = str(val)
+                self._pending_note_ia = parsed.get("note_ia", "")
+                return
+
+            meaningful = any(str(parsed.get(k) or "").strip()
+                              for k in ("nom", "appellation", "millesime", "cepage"))
+            if meaningful:
+                self.photo_status_label.text = "Analyse terminee."
+                self.analysis_result = parsed
+                self.build_form_content()
+            else:
+                self.photo_status_label.text = "Analyse peu concluante, completez manuellement."
+                self.photo_status_label.color = (0.69, 0.54, 0.31, 1)
+                mapping = ["nom", "appellation", "millesime", "cepage", "region",
+                           "garde_min", "garde_max", "prix_estime"]
+                for key in mapping:
+                    val = parsed.get(key)
+                    if val not in (None, "") and key in self.inputs:
+                        self.inputs[key].text = str(val)
+                self._pending_note_ia = parsed.get("note_ia", "")
 
         def on_error(msg):
             self.photo_status_label.text = msg
+            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
 
         analyze_label([self.pending_photo, self.pending_photo_back], api_key, on_success, on_error)
 
@@ -1163,18 +1256,40 @@ class WineApp(App):
         self.pending_photo = None
         self.pending_photo_back = None
         self._pending_note_ia = ""
+        self.analysis_result = None
         self.editing_bottle = None
 
     # -- CRUD -----------------------------------------------------------
     def add_bottle(self):
-        nom = self.inputs["nom"].text.strip()
-        if not nom:
-            self.photo_status_label.text = "Indiquez au moins un nom de vin."
-            return
+        using_preview = (not self.editing_bottle) and self.analysis_result
 
-        bottle = {k: ti.text.strip() for k, ti in self.inputs.items()}
+        if using_preview:
+            a = self.analysis_result
+            nom = str(a.get("nom") or "").strip()
+            if not nom:
+                self.photo_status_label.text = "Analyse incomplete : nom manquant, saisissez-le."
+                return
+            bottle = {
+                "nom": nom,
+                "appellation": str(a.get("appellation") or ""),
+                "millesime": str(a.get("millesime") or ""),
+                "cepage": str(a.get("cepage") or ""),
+                "region": str(a.get("region") or ""),
+                "garde_min": str(a.get("garde_min") or ""),
+                "garde_max": str(a.get("garde_max") or ""),
+                "prix_estime": str(a.get("prix_estime") or ""),
+                "prix_paye": self.inputs["prix_paye"].text.strip(),
+            }
+            bottle["note_ia"] = a.get("note_ia", "")
+        else:
+            nom = self.inputs["nom"].text.strip()
+            if not nom:
+                self.photo_status_label.text = "Indiquez au moins un nom de vin."
+                return
+            bottle = {k: ti.text.strip() for k, ti in self.inputs.items()}
+            bottle["note_ia"] = self._pending_note_ia
+
         bottle["type"] = self.type_spinner.text
-        bottle["note_ia"] = self._pending_note_ia
 
         front_path = self._persist_photo(self.pending_photo, "front")
         if front_path:

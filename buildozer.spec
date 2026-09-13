@@ -12,7 +12,8 @@ requirements = python3,kivy,certifi
 orientation = portrait
 fullscreen = 0
 
-# Add icon.filename = %(source.dir)s/icon.png once you have an icon ready
+icon.filename = %(source.dir)s/icon.png
+presplash.filename = %(source.dir)s/presplash.jpg
 
 android.accept_sdk_license = True
 p4a.branch = v2024.01.21
