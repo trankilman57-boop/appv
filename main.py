@@ -1008,23 +1008,54 @@ class WineApp(App):
 
         current = self.sm.current
 
-        def make_item(icon, text, screen_name, is_scan=False):
+        def draw_icon(kind, color, size=dp(24)):
+            from kivy.graphics import Line
+            w = Widget(size_hint=(None, None), size=(size, size))
+
+            def redraw(*_a):
+                w.canvas.clear()
+                x, y = w.pos
+                s = size
+                with w.canvas:
+                    Color(*color)
+                    if kind == "home":
+                        Line(points=[x + s * 0.08, y + s * 0.42, x + s * 0.5, y + s * 0.88,
+                                     x + s * 0.92, y + s * 0.42],
+                             width=dp(1.6), joint="round", cap="round")
+                        Line(rectangle=(x + s * 0.24, y + s * 0.08, s * 0.52, s * 0.42), width=dp(1.6))
+                    elif kind == "list":
+                        for frac, wfrac in ((0.72, 0.7), (0.48, 0.7), (0.24, 0.45)):
+                            Rectangle(pos=(x + s * 0.16, y + s * frac - dp(2)),
+                                      size=(s * wfrac, dp(4)))
+                    elif kind == "camera":
+                        Line(rectangle=(x + s * 0.08, y + s * 0.14, s * 0.84, s * 0.58), width=dp(1.6))
+                        Rectangle(pos=(x + s * 0.34, y + s * 0.7), size=(s * 0.32, s * 0.14))
+                        Line(circle=(x + s * 0.5, y + s * 0.43, s * 0.16), width=dp(1.6))
+                    elif kind == "person":
+                        Line(circle=(x + s * 0.5, y + s * 0.72, s * 0.15), width=dp(1.6))
+                        Line(circle=(x + s * 0.5, y + s * 0.18, s * 0.34, 20, 160), width=dp(1.6))
+
+            w.bind(pos=redraw, size=redraw)
+            redraw()
+            return w
+
+        def make_item(icon_kind, text, screen_name, is_scan=False):
             active = current == screen_name
             item = Factory.TabItem()
             color = ACCENT if active else TEXT_MUTED
             if is_scan:
-                icon_holder = Widget(size_hint=(None, None), size=(dp(44), dp(44)),
-                                      pos_hint={"center_x": 0.5})
+                icon_holder = Widget(size_hint=(None, None), size=(dp(44), dp(44)))
                 with icon_holder.canvas:
                     Color(*ACCENT)
                     circ = RoundedRectangle(pos=icon_holder.pos, size=icon_holder.size, radius=[dp(22)])
                 icon_holder.bind(pos=lambda w, v: setattr(circ, "pos", v),
                                   size=lambda w, v: setattr(circ, "size", v))
-                icon_lbl = Label(text=icon, font_size=dp(18), color=(1, 1, 1, 1),
-                                  pos=icon_holder.pos, size=icon_holder.size)
-                icon_holder.bind(pos=lambda w, v: setattr(icon_lbl, "pos", v),
-                                  size=lambda w, v: setattr(icon_lbl, "size", v))
-                icon_holder.add_widget(icon_lbl)
+                cam_icon = draw_icon("camera", (1, 1, 1, 1), size=dp(22))
+                cam_icon.pos = (icon_holder.center_x - cam_icon.width / 2,
+                                 icon_holder.center_y - cam_icon.height / 2)
+                icon_holder.bind(pos=lambda w, *_: setattr(
+                    cam_icon, "pos", (w.center_x - cam_icon.width / 2, w.center_y - cam_icon.height / 2)))
+                icon_holder.add_widget(cam_icon)
                 icon_wrap = BoxLayout(size_hint_y=None, height=dp(44))
                 icon_wrap.add_widget(Widget())
                 icon_wrap.add_widget(icon_holder)
@@ -1033,8 +1064,12 @@ class WineApp(App):
                 icon_holder.width = dp(44)
                 item.add_widget(icon_wrap)
             else:
-                icon_lbl = Label(text=icon, font_size=dp(19), color=color, size_hint_y=None, height=dp(24))
-                item.add_widget(icon_lbl)
+                icon = draw_icon(icon_kind, color, size=dp(22))
+                icon_row = BoxLayout(size_hint_y=None, height=dp(24))
+                icon_row.add_widget(Widget())
+                icon_row.add_widget(icon)
+                icon_row.add_widget(Widget())
+                item.add_widget(icon_row)
             label_lbl = Label(text=text, font_size=dp(10.5), bold=True, color=color,
                                size_hint_y=None, height=dp(18))
             item.add_widget(label_lbl)
@@ -1044,10 +1079,10 @@ class WineApp(App):
                 item.bind(on_release=lambda *_: setattr(self.sm, "current", screen_name))
             return item
 
-        bar.add_widget(make_item("Acc.", "Accueil", "home"))
-        bar.add_widget(make_item("Cave", "Ma cave", "cave"))
-        bar.add_widget(make_item("+", "Scanner", "scan", is_scan=True))
-        bar.add_widget(make_item("Moi", "Profil", "profil"))
+        bar.add_widget(make_item("home", "Accueil", "home"))
+        bar.add_widget(make_item("list", "Ma cave", "cave"))
+        bar.add_widget(make_item("camera", "Scanner", "scan", is_scan=True))
+        bar.add_widget(make_item("person", "Profil", "profil"))
 
         self.tab_bar_container.add_widget(bar)
 
