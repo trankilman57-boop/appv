@@ -14,7 +14,7 @@ import certifi
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import mainthread, Clock
-from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.popup import Popup
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.spinner import Spinner
@@ -880,6 +880,7 @@ class WineApp(App):
         self.detail_screen = DetailScreen(name="detail")
 
         sm = ScreenManager()
+        sm.transition = NoTransition()
         self.sm = sm
 
         from kivy.uix.boxlayout import BoxLayout
