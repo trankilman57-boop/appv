@@ -901,19 +901,46 @@ class WineApp(App):
 
         sm.bind(current=lambda *_: self.on_screen_change())
 
-        Clock.schedule_once(lambda dt: setattr(self.sm, "current", "home"), 1.8)
+        Clock.schedule_once(self._go_home_safe, 1.8)
         return root_layout
+
+    def _go_home_safe(self, dt):
+        try:
+            self.sm.current = "home"
+        except Exception:
+            import traceback
+            self._show_crash_popup(traceback.format_exc())
+
+    def _show_crash_popup(self, text):
+        from kivy.uix.label import Label
+        from kivy.uix.scrollview import ScrollView
+        from kivy.uix.boxlayout import BoxLayout
+
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(10))
+        lbl = Label(text=text, size_hint_y=None, font_size=dp(11), color=(0, 0, 0, 1),
+                    halign="left", valign="top")
+        lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+        lbl.bind(texture_size=lambda w, v: setattr(w, "height", v[1]))
+        sv = ScrollView()
+        sv.add_widget(lbl)
+        box.add_widget(sv)
+        popup = Popup(title="Erreur de demarrage", content=box, size_hint=(0.95, 0.9))
+        popup.open()
 
     def on_screen_change(self):
         if not hasattr(self, "tab_bar_container"):
             return
-        hide = self.sm.current in ("detail", "splash")
-        self.tab_bar_container.height = 0 if hide else dp(78)
-        self.tab_bar_container.opacity = 0 if hide else 1
-        self.tab_bar_container.disabled = hide
-        self.rebuild_tab_bar()
-        if self.sm.current == "home":
-            self.build_home_content()
+        try:
+            hide = self.sm.current in ("detail", "splash")
+            self.tab_bar_container.height = 0 if hide else dp(78)
+            self.tab_bar_container.opacity = 0 if hide else 1
+            self.tab_bar_container.disabled = hide
+            self.rebuild_tab_bar()
+            if self.sm.current == "home":
+                self.build_home_content()
+        except Exception:
+            import traceback
+            self._show_crash_popup(traceback.format_exc())
 
     # -- tab bar --------------------------------------------------------
     def rebuild_tab_bar(self):
