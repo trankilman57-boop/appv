@@ -1047,35 +1047,35 @@ class WineApp(App):
         def make_item(icon_kind, text, screen_name, is_scan=False):
             active = current == screen_name
             item = Factory.TabItem()
-            color = ACCENT if active else TEXT_MUTED
-            if is_scan:
-                icon_holder = Widget(size_hint=(None, None), size=(dp(44), dp(44)))
-                with icon_holder.canvas:
-                    Color(*ACCENT)
-                    circ = RoundedRectangle(pos=icon_holder.pos, size=icon_holder.size, radius=[dp(22)])
-                icon_holder.bind(pos=lambda w, v: setattr(circ, "pos", v),
-                                  size=lambda w, v: setattr(circ, "size", v))
-                cam_icon = draw_icon("camera", (1, 1, 1, 1), size=dp(22))
-                cam_icon.pos = (icon_holder.center_x - cam_icon.width / 2,
-                                 icon_holder.center_y - cam_icon.height / 2)
-                icon_holder.bind(pos=lambda w, *_: setattr(
-                    cam_icon, "pos", (w.center_x - cam_icon.width / 2, w.center_y - cam_icon.height / 2)))
-                icon_holder.add_widget(cam_icon)
-                icon_wrap = BoxLayout(size_hint_y=None, height=dp(44))
-                icon_wrap.add_widget(Widget())
-                icon_wrap.add_widget(icon_holder)
-                icon_wrap.add_widget(Widget())
-                icon_holder.size_hint_x = None
-                icon_holder.width = dp(44)
-                item.add_widget(icon_wrap)
-            else:
-                icon = draw_icon(icon_kind, color, size=dp(22))
-                icon_row = BoxLayout(size_hint_y=None, height=dp(24))
-                icon_row.add_widget(Widget())
-                icon_row.add_widget(icon)
-                icon_row.add_widget(Widget())
-                item.add_widget(icon_row)
-            label_lbl = Label(text=text, font_size=dp(10.5), bold=True, color=color,
+            label_color = ACCENT if active else TEXT_MUTED
+
+            circle_size = dp(36)
+            icon_size = dp(18)
+            circle_color = ACCENT if active else CREAM_ALT
+            icon_color = (1, 1, 1, 1) if active else ACCENT
+
+            icon_holder = Widget(size_hint=(None, None), size=(circle_size, circle_size))
+            with icon_holder.canvas:
+                Color(*circle_color)
+                circ = RoundedRectangle(pos=icon_holder.pos, size=icon_holder.size,
+                                         radius=[circle_size / 2])
+            icon_holder.bind(pos=lambda w, v: setattr(circ, "pos", v),
+                              size=lambda w, v: setattr(circ, "size", v))
+            icon = draw_icon(icon_kind, icon_color, size=icon_size)
+            icon.pos = (icon_holder.center_x - icon.width / 2, icon_holder.center_y - icon.height / 2)
+            icon_holder.bind(pos=lambda w, *_: setattr(
+                icon, "pos", (w.center_x - icon.width / 2, w.center_y - icon.height / 2)))
+            icon_holder.add_widget(icon)
+
+            icon_wrap = BoxLayout(size_hint_y=None, height=dp(44))
+            icon_wrap.add_widget(Widget())
+            icon_wrap.add_widget(icon_holder)
+            icon_wrap.add_widget(Widget())
+            icon_holder.size_hint_x = None
+            icon_holder.width = circle_size
+            item.add_widget(icon_wrap)
+
+            label_lbl = Label(text=text, font_size=dp(10.5), bold=True, color=label_color,
                                size_hint_y=None, height=dp(18))
             item.add_widget(label_lbl)
             if is_scan:
