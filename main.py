@@ -720,15 +720,26 @@ class DetailScreen(Screen):
 
         photo_path = bottle.get("photo_path")
         header = FloatLayout(size_hint_y=None, height=dp(200))
-        if photo_path and os.path.exists(photo_path):
-            img = KivyImage(source=photo_path, allow_stretch=True, keep_ratio=False,
-                             size=header.size, pos=header.pos)
-            header.bind(size=lambda w, v: setattr(img, "size", v), pos=lambda w, v: setattr(img, "pos", v))
-        else:
-            img = KivyImage(source='assets/vineyard_bg.jpg', allow_stretch=True, keep_ratio=False,
-                             size=header.size, pos=header.pos)
-            header.bind(size=lambda w, v: setattr(img, "size", v), pos=lambda w, v: setattr(img, "pos", v))
-        header.add_widget(img)
+        img_source = photo_path if (photo_path and os.path.exists(photo_path)) else 'assets/vineyard_bg.jpg'
+        clip = Factory.ClipBox(size=header.size, pos=header.pos)
+        header.bind(size=lambda w, v: setattr(clip, "size", v), pos=lambda w, v: setattr(clip, "pos", v))
+        img = KivyImage(source=img_source, allow_stretch=True, keep_ratio=True)
+
+        def _fit_cover(*_a):
+            if not img.texture:
+                return
+            tw, th = img.texture.size
+            cw, ch = header.size
+            if not (tw and th and cw and ch):
+                return
+            scale = max(cw / tw, ch / th)
+            img.size = (tw * scale, th * scale)
+            img.pos = (header.x + (cw - img.width) / 2, header.y + (ch - img.height) / 2)
+
+        img.bind(texture=_fit_cover)
+        header.bind(size=_fit_cover, pos=_fit_cover)
+        clip.add_widget(img)
+        header.add_widget(clip)
 
         overlay = Widget(size=header.size, pos=header.pos)
         with overlay.canvas:
@@ -910,7 +921,22 @@ class WineApp(App):
         sm.bind(current=lambda *_: self.on_screen_change())
 
         Clock.schedule_once(self._go_home_safe, 1.8)
+        Window.bind(on_keyboard=self._on_android_back)
         return root_layout
+
+    def _on_android_back(self, window, key, *args):
+        if key != 27:
+            return False
+        if self.sm.current == "detail":
+            self.go_cave()
+            return True
+        if self.sm.current == "scan":
+            self.cancel_form()
+            return True
+        if self.sm.current != "home":
+            self.sm.current = "home"
+            return True
+        return False
 
     def _request_android_permissions(self):
         try:
@@ -1117,6 +1143,7 @@ class WineApp(App):
     def _build_compact_row(self, bottle):
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.label import Label
+        from kivy.uix.image import Image as KivyImage
         from kivy.factory import Factory
 
         status, status_label = compute_status(bottle)
@@ -1129,13 +1156,24 @@ class WineApp(App):
         row.bind(pos=lambda w, v: setattr(row_rect, "pos", v),
                  size=lambda w, v: setattr(row_rect, "size", v))
 
-        swatch = Widget(size_hint_x=None, width=dp(38))
-        with swatch.canvas:
-            Color(*TYPE_COLORS.get(bottle.get("type") or "Autre", (0.5, 0.5, 0.5, 1)))
-            sw_rect = RoundedRectangle(pos=swatch.pos, size=swatch.size, radius=[dp(6)])
-        swatch.bind(pos=lambda w, v: setattr(sw_rect, "pos", v),
-                    size=lambda w, v: setattr(sw_rect, "size", v))
-        row.add_widget(swatch)
+        photo_path = bottle.get("photo_path")
+        has_photo = photo_path and os.path.exists(photo_path)
+        thumb = Factory.ClipBox(size_hint_x=None, width=dp(38))
+        if has_photo:
+            with thumb.canvas.before:
+                Color(1, 1, 1, 1)
+                thumb_bg = RoundedRectangle(pos=thumb.pos, size=thumb.size, radius=[dp(6)])
+            thumb.bind(pos=lambda w, v: setattr(thumb_bg, "pos", v),
+                       size=lambda w, v: setattr(thumb_bg, "size", v))
+            img = KivyImage(source=photo_path, allow_stretch=True, keep_ratio=False)
+            thumb.add_widget(img)
+        else:
+            with thumb.canvas.before:
+                Color(*TYPE_COLORS.get(bottle.get("type") or "Autre", (0.5, 0.5, 0.5, 1)))
+                sw_rect = RoundedRectangle(pos=thumb.pos, size=thumb.size, radius=[dp(6)])
+            thumb.bind(pos=lambda w, v: setattr(sw_rect, "pos", v),
+                       size=lambda w, v: setattr(sw_rect, "size", v))
+        row.add_widget(thumb)
 
         info = BoxLayout(orientation="vertical")
         name_lbl = Label(text=bottle.get("nom", "?"), bold=True, font_size=dp(14), color=TEXT_DARK,
@@ -1223,6 +1261,7 @@ class WineApp(App):
     def build_bottle_card(self, bottle):
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.label import Label
+        from kivy.uix.image import Image as KivyImage
         from kivy.factory import Factory
 
         status, status_label = compute_status(bottle)
@@ -1236,13 +1275,24 @@ class WineApp(App):
         outer.bind(pos=lambda w, v: setattr(outer_rect, "pos", v),
                    size=lambda w, v: setattr(outer_rect, "size", v))
 
-        swatch = Widget(size_hint_x=None, width=dp(40))
-        with swatch.canvas:
-            Color(*TYPE_COLORS.get(bottle.get("type") or "Autre", (0.5, 0.5, 0.5, 1)))
-            sw_rect = RoundedRectangle(pos=swatch.pos, size=swatch.size, radius=[dp(6)])
-        swatch.bind(pos=lambda w, v: setattr(sw_rect, "pos", v),
+        photo_path = bottle.get("photo_path")
+        has_photo = photo_path and os.path.exists(photo_path)
+        thumb = Factory.ClipBox(size_hint_x=None, width=dp(40))
+        if has_photo:
+            with thumb.canvas.before:
+                Color(1, 1, 1, 1)
+                thumb_bg = RoundedRectangle(pos=thumb.pos, size=thumb.size, radius=[dp(6)])
+            thumb.bind(pos=lambda w, v: setattr(thumb_bg, "pos", v),
+                       size=lambda w, v: setattr(thumb_bg, "size", v))
+            img = KivyImage(source=photo_path, allow_stretch=True, keep_ratio=False)
+            thumb.add_widget(img)
+        else:
+            with thumb.canvas.before:
+                Color(*TYPE_COLORS.get(bottle.get("type") or "Autre", (0.5, 0.5, 0.5, 1)))
+                sw_rect = RoundedRectangle(pos=thumb.pos, size=thumb.size, radius=[dp(6)])
+            thumb.bind(pos=lambda w, v: setattr(sw_rect, "pos", v),
                     size=lambda w, v: setattr(sw_rect, "size", v))
-        outer.add_widget(swatch)
+        outer.add_widget(thumb)
 
         info = BoxLayout(orientation="vertical", spacing=dp(3))
         top_row = BoxLayout(size_hint_y=None, height=dp(20))
