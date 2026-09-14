@@ -905,6 +905,19 @@ class WineApp(App):
         Clock.schedule_once(self._go_home_safe, 1.8)
         return root_layout
 
+    def _request_android_permissions(self):
+        try:
+            from android.permissions import request_permissions, Permission
+            perms = []
+            for name in ("CAMERA", "READ_MEDIA_IMAGES", "WRITE_EXTERNAL_STORAGE",
+                         "READ_EXTERNAL_STORAGE"):
+                p = getattr(Permission, name, None)
+                if p:
+                    perms.append(p)
+            request_permissions(perms)
+        except Exception as e:
+            print(f"Permissions non demandees (normal hors Android) : {e}")
+
     def _go_home_safe(self, dt):
         try:
             self.sm.current = "home"
