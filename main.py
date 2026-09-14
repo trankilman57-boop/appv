@@ -1,1466 +1,1236 @@
-import json
-import os
-import ssl
-import time
-import threading
-import base64
-from collections import Counter
-import urllib.request
-import urllib.error
-from datetime import date
+#!/usr/bin/env python3
+"""
+main.py — Suivi Bourse (Kivy, client léger) — v3
 
-import certifi
+Nouveautés vs v2 :
+- Rafraîchissement progressif : chaque position affiche son résultat dès
+  qu'il arrive (pool de threads + mise à jour ligne par ligne), au lieu
+  d'attendre que TOUT le portefeuille soit chargé avant d'afficher quoi
+  que ce soit.
+- UI retravaillée : palette cohérente, cartes avec accent coloré selon
+  PV/MV, hiérarchie visuelle plus claire.
+- Écran Actualités par position (titres + sentiment basique + lien).
+
+Toujours un client léger (kivy + requests) : la vraie logique tourne sur
+server.py (voir README).
+"""
+
+import threading
+import webbrowser
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from kivy.app import App
-from kivy.lang import Builder
 from kivy.clock import mainthread, Clock
-from kivy.uix.screenmanager import ScreenManager, Screen
-from kivy.uix.popup import Popup
-from kivy.uix.behaviors import ButtonBehavior
-from kivy.uix.spinner import Spinner
-from kivy.uix.widget import Widget
-from kivy.graphics import Color, Rectangle, RoundedRectangle
-from kivy.metrics import dp
 from kivy.core.window import Window
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(APP_DIR, "cave.json")
-SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
-TEMP_PHOTO_FRONT = os.path.join(APP_DIR, "temp_label_front.jpg")
-TEMP_PHOTO_BACK = os.path.join(APP_DIR, "temp_label_back.jpg")
-PHOTOS_DIR = os.path.join(APP_DIR, "photos")
-os.makedirs(PHOTOS_DIR, exist_ok=True)
-
-SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-def load_bottles():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-
-def save_bottles(bottles):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(bottles, f, ensure_ascii=False, indent=2)
-
-
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_settings(settings):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# Drinking window logic
-# ---------------------------------------------------------------------------
-
-def compute_status(bottle):
-    try:
-        millesime = int(bottle.get("millesime", ""))
-    except (ValueError, TypeError):
-        return "unknown", "Millésime inconnu"
-
-    garde_min = bottle.get("garde_min", "")
-    garde_max = bottle.get("garde_max", "")
-    try:
-        garde_min = int(garde_min) if garde_min not in (None, "") else None
-    except (ValueError, TypeError):
-        garde_min = None
-    try:
-        garde_max = int(garde_max) if garde_max not in (None, "") else None
-    except (ValueError, TypeError):
-        garde_max = None
-
-    if garde_min is None and garde_max is None:
-        return "unknown", "Fenêtre inconnue"
-
-    age = date.today().year - millesime
-    debut = garde_min if garde_min is not None else 0
-    fin = garde_max if garde_max is not None else debut + 5
-
-    if age < debut:
-        restant = debut - age
-        return "wait", ("Presque prêt" if restant <= 1 else f"À garder encore {restant} ans")
-    if age > fin:
-        depuis = age - fin
-        return "late", f"Passé son pic depuis {depuis} an{'s' if depuis > 1 else ''}"
-    return "now", "À boire maintenant"
-
-
-STATUS_COLORS = {
-    "now": (0.42, 0.52, 0.28, 1),
-    "wait": (0.69, 0.54, 0.31, 1),
-    "late": (0.66, 0.36, 0.23, 1),
-    "unknown": (0.6, 0.6, 0.6, 1),
-}
-STATUS_ORDER = {"now": 0, "wait": 1, "late": 2, "unknown": 3}
-STATUS_SHORT = {"now": "Pret", "wait": "Attendre", "late": "Passe", "unknown": "?"}
-
-
-def compute_benefice(bottle):
-    try:
-        paye = float(bottle.get("prix_paye") or "")
-        estime = float(bottle.get("prix_estime") or "")
-    except (ValueError, TypeError):
-        return None
-    return round(estime - paye, 2)
-
-TYPE_OPTIONS = ["Rouge", "Blanc", "Rose", "Petillant", "Autre"]
-TYPE_COLORS = {
-    "Rouge": (0.55, 0.12, 0.16, 1),
-    "Blanc": (0.82, 0.72, 0.35, 1),
-    "Rose": (0.86, 0.55, 0.58, 1),
-    "Petillant": (0.75, 0.68, 0.4, 1),
-    "Autre": (0.5, 0.5, 0.5, 1),
-}
-
-
-def compute_type_breakdown(bottles):
-    counts = {}
-    for b in bottles:
-        t = b.get("type") or "Autre"
-        counts[t] = counts.get(t, 0) + 1
-    total = sum(counts.values()) or 1
-    return [(t, counts[t], round(100 * counts[t] / total)) for t in
-            sorted(counts, key=lambda k: -counts[k])]
-
-
-def compute_top_terms(bottles, field, top_n=3):
-    counter = Counter()
-    for b in bottles:
-        raw = (b.get(field) or "").strip()
-        if not raw:
-            continue
-        if field == "cepage":
-            parts = [p.strip() for p in raw.replace("/", ",").split(",") if p.strip()]
-        else:
-            parts = [raw]
-        for p in parts:
-            counter[p] += 1
-    return counter.most_common(top_n)
-
-
-def matches_search(bottle, query):
-    if not query:
-        return True
-    q = query.lower().strip()
-    haystack = " ".join([
-        bottle.get("nom", ""), bottle.get("appellation", ""),
-        bottle.get("cepage", ""), bottle.get("region", ""),
-    ]).lower()
-    return q in haystack
-
-
-def sort_bottles(bottles, mode):
-    if mode == "Nom":
-        return sorted(bottles, key=lambda b: (b.get("nom") or "").lower())
-    if mode == "Prix":
-        def price_key(b):
-            try:
-                return -float(b.get("prix_paye") or b.get("prix_estime") or 0)
-            except ValueError:
-                return 0
-        return sorted(bottles, key=price_key)
-    if mode == "Millesime":
-        def year_key(b):
-            try:
-                return -int(b.get("millesime"))
-            except (ValueError, TypeError):
-                return 0
-        return sorted(bottles, key=year_key)
-    return sorted(bottles, key=lambda b: STATUS_ORDER[compute_status(b)[0]])
-
-
-# ---------------------------------------------------------------------------
-# Android camera / gallery capture (falls back gracefully off-device)
-# ---------------------------------------------------------------------------
-
-def open_camera(temp_path, on_captured, on_error):
-    """Opens the native camera app and saves the photo to temp_path.
-    Uses MediaStore insertion so no FileProvider/manifest changes are needed
-    (works on Android 10+)."""
-    try:
-        from jnius import autoclass
-        from android import activity, mActivity  # noqa
-
-        Intent = autoclass('android.content.Intent')
-        MediaStore = autoclass('android.provider.MediaStore')
-        MediaStoreImagesMedia = autoclass('android.provider.MediaStore$Images$Media')
-        ContentValues = autoclass('android.content.ContentValues')
-        REQUEST_CODE = 4321
-
-        resolver = mActivity.getContentResolver()
-        values = ContentValues()
-        values.put("_display_name", f"macave_{int(time.time())}.jpg")
-        values.put("mime_type", "image/jpeg")
-        uri = resolver.insert(MediaStoreImagesMedia.EXTERNAL_CONTENT_URI, values)
-        if uri is None:
-            on_error("Impossible de préparer le stockage pour la photo.")
-            return
-
-        def on_activity_result(request_code, result_code, intent):
-            if request_code != REQUEST_CODE:
-                return
-            try:
-                activity.unbind(on_activity_result=on_activity_result)
-                _save_uri_to_file(uri, temp_path)
-                on_picked_mainthread(temp_path)
-            except Exception as e:
-                on_error_mainthread(f"Erreur lecture photo : {e}")
-
-        @mainthread
-        def on_picked_mainthread(path):
-            on_captured(path)
-
-        @mainthread
-        def on_error_mainthread(msg):
-            on_error(msg)
-
-        activity.bind(on_activity_result=on_activity_result)
-        from jnius import cast
-        intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-        intent.putExtra(MediaStore.EXTRA_OUTPUT, cast('android.os.Parcelable', uri))
-        mActivity.startActivityForResult(intent, REQUEST_CODE)
-    except Exception as e:
-        on_error(f"Appareil photo indisponible sur cet appareil ({e}).")
-
-
-def pick_image_from_gallery(temp_path, on_picked, on_error):
-    try:
-        from jnius import autoclass
-        from android import activity, mActivity  # noqa
-
-        Intent = autoclass('android.content.Intent')
-        REQUEST_CODE = 1234
-
-        def on_activity_result(request_code, result_code, intent):
-            if request_code != REQUEST_CODE:
-                return
-            try:
-                if intent is None:
-                    on_error("Aucune image sélectionnée.")
-                    return
-                uri = intent.getData()
-                if uri is None:
-                    on_error("Aucune image sélectionnée.")
-                    return
-                _save_uri_to_file(uri, temp_path)
-                activity.unbind(on_activity_result=on_activity_result)
-                on_picked(temp_path)
-            except Exception as e:
-                on_error(f"Erreur lecture image : {e}")
-
-        activity.bind(on_activity_result=on_activity_result)
-        intent = Intent(Intent.ACTION_GET_CONTENT)
-        intent.setType("image/*")
-        mActivity.startActivityForResult(intent, REQUEST_CODE)
-    except Exception as e:
-        on_error(f"Sélection d'image indisponible sur cet appareil ({e}).")
-
-
-def _save_uri_to_file(uri, dest_path):
-    from jnius import autoclass
-    from android import mActivity
-
-    BitmapFactory = autoclass('android.graphics.BitmapFactory')
-    CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-    FileOutputStream = autoclass('java.io.FileOutputStream')
-    Bitmap = autoclass('android.graphics.Bitmap')
-    Matrix = autoclass('android.graphics.Matrix')
-    ExifInterface = autoclass('android.media.ExifInterface')
-
-    resolver = mActivity.getContentResolver()
-
-    input_stream = resolver.openInputStream(uri)
-    bitmap = BitmapFactory.decodeStream(input_stream)
-    input_stream.close()
-
-    orientation = ExifInterface.ORIENTATION_NORMAL
-    try:
-        exif_stream = resolver.openInputStream(uri)
-        exif = ExifInterface(exif_stream)
-        orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-        exif_stream.close()
-    except Exception:
-        pass
-
-    ROTATE_90 = 6
-    ROTATE_180 = 3
-    ROTATE_270 = 8
-    angle = {ROTATE_90: 90, ROTATE_180: 180, ROTATE_270: 270}.get(orientation)
-    if angle:
-        matrix = Matrix()
-        matrix.postRotate(angle)
-        bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, True)
-
-    out = FileOutputStream(dest_path)
-    bitmap.compress(CompressFormat.JPEG, 85, out)
-    out.close()
-
-
-def share_bottle(bottle):
-    try:
-        from jnius import autoclass
-        from android import mActivity
-
-        Intent = autoclass('android.content.Intent')
-        status, status_label = compute_status(bottle)
-        lines = [
-            f'{bottle.get("nom","?")} {bottle.get("millesime","")}'.strip(),
-            bottle.get("appellation", ""),
-            bottle.get("cepage", ""),
-            status_label,
-        ]
-        if bottle.get("note_ia"):
-            lines.append("")
-            lines.append(bottle["note_ia"])
-        text = "\n".join(l for l in lines if l)
-
-        intent = Intent(Intent.ACTION_SEND)
-        intent.setType("text/plain")
-        intent.putExtra(Intent.EXTRA_TEXT, text)
-        chooser = Intent.createChooser(intent, "Partager cette bouteille")
-        mActivity.startActivity(chooser)
-    except Exception as e:
-        print(f"Partage indisponible: {e}")
-
-
-# ---------------------------------------------------------------------------
-# Gemini API (free tier) - stdlib only, with proper SSL cert bundle
-# ---------------------------------------------------------------------------
-
-PROMPT = """Tu es un sommelier expert. Analyse cette ou ces photos d'étiquette de vin (recto, et verso si fourni) et réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ni après, sans balises markdown, avec exactement ces clés :
-{
-  "nom": "nom du domaine/château/producteur",
-  "appellation": "appellation ou dénomination",
-  "millesime": "année en 4 chiffres ou vide si illisible",
-  "cepage": "cépage(s) principal(aux), ou meilleure estimation selon l'appellation",
-  "region": "région viticole",
-  "garde_min": "nombre d'années après le millésime avant que ce vin soit à son meilleur (entier)",
-  "garde_max": "nombre d'années après le millésime jusqu'à la fin de la fenêtre optimale (entier)",
-  "prix_estime": "estimation du prix de vente moyen en euros (nombre seul)",
-  "note_ia": "une ou deux phrases sur le style du vin et la raison de cette fenêtre de garde"
-}
-Utilise le verso s'il est fourni pour affiner le cépage exact et toute info complémentaire. Fais ta meilleure estimation d'expert plutôt que de laisser un champ vide, sauf pour le nom et le millésime où l'exactitude prime."""
-
-
-def test_api_key(api_key, on_success, on_error):
-    def worker():
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=20, context=SSL_CONTEXT) as resp:
-                json.loads(resp.read().decode("utf-8"))
-            on_success_mainthread()
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="ignore")
-            on_error_mainthread(f"Clé refusée ({e.code}) : {body[:150]}")
-        except Exception as e:
-            on_error_mainthread(f"Échec de connexion : {e}")
-
-    @mainthread
-    def on_success_mainthread():
-        on_success()
-
-    @mainthread
-    def on_error_mainthread(msg):
-        on_error(msg)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-def analyze_label(image_paths, api_key, on_success, on_error):
-    def worker():
-        try:
-            parts = [{"text": PROMPT}]
-            for path in image_paths:
-                if not path or not os.path.exists(path):
-                    continue
-                with open(path, "rb") as f:
-                    b64 = base64.b64encode(f.read()).decode("ascii")
-                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
-
-            if len(parts) == 1:
-                on_error_mainthread("Aucune photo valide à analyser.")
-                return
-
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {"temperature": 0.2},
-            }
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-3.6-flash:generateContent?key={api_key}"
-            )
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-
-            candidates = data.get("candidates", [])
-            if not candidates:
-                on_error_mainthread("Réponse vide de l'API (photo peu lisible ?).")
-                return
-            text_block = candidates[0]["content"]["parts"][0]["text"]
-            clean = text_block.strip().replace("```json", "").replace("```", "").strip()
-            parsed = json.loads(clean)
-            on_success_mainthread(parsed)
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="ignore")
-            on_error_mainthread(f"Erreur API ({e.code}) : {body[:200]}")
-        except Exception as e:
-            on_error_mainthread(f"Échec de l'analyse : {e}")
-
-    @mainthread
-    def on_success_mainthread(parsed):
-        on_success(parsed)
-
-    @mainthread
-    def on_error_mainthread(msg):
-        on_error(msg)
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
+from kivy.lang import Builder
+from kivy.properties import StringProperty, ListProperty, BooleanProperty
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.label import Label
+from kivy.factory import Factory
+
+import storage
+import api_client
+
+BG = (0.07, 0.08, 0.10, 1)
+CARD = (0.13, 0.145, 0.175, 1)
+TXT_MUTED = (0.62, 0.65, 0.70, 1)
+GREEN = (0.32, 0.78, 0.48, 1)
+RED = (0.92, 0.38, 0.38, 1)
+ORANGE = (0.95, 0.65, 0.25, 1)
+WHITE = (0.95, 0.96, 0.97, 1)
 
 KV = """
 #:import dp kivy.metrics.dp
 
-<RoundCard@BoxLayout>:
+<SectionLabel@Label>:
+    bold: True
+    font_size: "13sp"
+    color: 0.62, 0.65, 0.70, 1
+    size_hint_y: None
+    height: dp(26)
+    halign: "left"
+    text_size: self.size
+
+<PillButton@Button>:
+    background_normal: ""
+    background_color: 0.30, 0.62, 0.98, 1
+    color: 1, 1, 1, 1
+    bold: True
+    font_size: "13sp"
+
+<GhostButton@Button>:
+    background_normal: ""
+    background_color: 0.18, 0.20, 0.24, 1
+    color: 0.85, 0.87, 0.90, 1
+    font_size: "13sp"
+
+<PositionRow@BoxLayout>:
+    orientation: "vertical"
+    size_hint_y: None
+    height: dp(118)
+    padding: dp(14), dp(10)
+    spacing: dp(4)
     canvas.before:
         Color:
-            rgba: 0.945, 0.914, 0.859, 1
+            rgba: 0.13, 0.145, 0.175, 1
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(10)]
+        Color:
+            rgba: root.accent_color
+        RoundedRectangle:
+            pos: self.pos
+            size: (dp(4), self.height)
+            radius: [dp(2)]
+
+    ticker: ""
+    nom: ""
+    prix_txt: ""
+    quantite_txt: ""
+    pv_mv_txt: "..."
+    pv_mv_color: 0.62, 0.65, 0.70, 1
+    accent_color: 0.30, 0.62, 0.98, 1
+    sante_txt: "…"
+    div_txt: "…"
+    verdict: ""
+    a_des_alertes: False
+
+    BoxLayout:
+        size_hint_y: 0.35
+        Label:
+            text: root.nom + ("   [color=9fa3ab]" + root.prix_txt + "[/color]" if root.prix_txt else "")
+            markup: True
+            bold: True
+            font_size: "15sp"
+            color: 0.95, 0.96, 0.97, 1
+            halign: "left"
+            valign: "middle"
+            text_size: self.size
+            shorten: True
+        Label:
+            text: root.pv_mv_txt
+            color: root.pv_mv_color
+            bold: True
+            font_size: "15sp"
+            halign: "right"
+            valign: "middle"
+            text_size: self.size
+            size_hint_x: 0.5
+
+    BoxLayout:
+        size_hint_y: 0.30
+        Label:
+            text: (root.quantite_txt + " actions" if root.quantite_txt else "")
+            font_size: "12sp"
+            color: 0.62, 0.65, 0.70, 1
+            halign: "left"
+            text_size: self.size
+
+    BoxLayout:
+        size_hint_y: 0.35
+        spacing: dp(10)
+        Label:
+            text: "[color=9fa3ab]Santé[/color]  [b]" + root.sante_txt + "[/b]/10"
+            markup: True
+            font_size: "12sp"
+            color: 0.85, 0.87, 0.90, 1
+            halign: "left"
+            text_size: self.size
+        Label:
+            text: "[color=9fa3ab]Div[/color]  [b]" + root.div_txt + "[/b]/10"
+            markup: True
+            font_size: "12sp"
+            color: 0.85, 0.87, 0.90, 1
+            halign: "left"
+            text_size: self.size
+        Label:
+            markup: True
+            text: ("[color=4caf50]" if root.verdict.startswith("OK") else "[color=e05555]" if root.verdict.startswith("KO") else "[color=f2a63f]" if root.verdict.startswith("MOYEN") else "[color=9fa3ab]") + (root.verdict.split(" ", 1)[-1] if " " in root.verdict else root.verdict) + "[/color]" + ("  [color=f2a63f][b]![/b][/color]" if root.a_des_alertes else "")
+            font_size: "12sp"
+            halign: "right"
+            text_size: self.size
+
+<NewsRow@BoxLayout>:
+    orientation: "vertical"
+    size_hint_y: None
+    height: self.minimum_height
+    padding: dp(14), dp(10)
+    spacing: dp(4)
+    canvas.before:
+        Color:
+            rgba: 0.13, 0.145, 0.175, 1
         RoundedRectangle:
             pos: self.pos
             size: self.size
             radius: [dp(10)]
 
-<AccentBar@Widget>:
-    bar_color: 0.6, 0.6, 0.6, 1
-    size_hint_x: None
-    width: dp(5)
-    canvas:
-        Color:
-            rgba: self.bar_color
-        Rectangle:
-            pos: self.pos
-            size: self.size
+    titre: ""
+    editeur: ""
+    date_txt: ""
+    sentiment: "neutre"
+    lien: ""
+    alerte: False
+    source: ""
 
-<StyledInput@TextInput>:
-    background_color: 1, 1, 1, 1
-    foreground_color: 0.17, 0.13, 0.11, 1
-    cursor_color: 0.55, 0.33, 0.10, 1
-    padding: [dp(10), dp(10), dp(10), dp(10)]
-    size_hint_y: None
-    height: dp(44)
-    multiline: False
+    BoxLayout:
+        size_hint_y: None
+        height: dp(20) if root.alerte else 0
+        opacity: 1 if root.alerte else 0
+        Label:
+            text: "! Actu récente pouvant impacter le cours" if root.alerte else ""
+            font_size: "11sp"
+            bold: True
+            color: 0.95, 0.65, 0.25, 1
+            halign: "left"
+            text_size: self.size
 
-<PrimaryButton@Button>:
-    background_normal: ''
-    background_color: 0.55, 0.33, 0.10, 1
-    color: 0.945, 0.914, 0.859, 1
-    bold: True
-    size_hint_y: None
-    height: dp(46)
+    Label:
+        text: root.titre
+        bold: True
+        font_size: "14sp"
+        color: 0.95, 0.96, 0.97, 1
+        size_hint_y: None
+        height: self.texture_size[1]
+        text_size: self.width, None
+        halign: "left"
 
-<GhostButton@Button>:
-    background_normal: ''
-    background_color: 0, 0, 0, 0
-    color: 0.55, 0.33, 0.10, 1
-    size_hint_y: None
-    height: dp(36)
+    BoxLayout:
+        size_hint_y: None
+        height: dp(22)
+        spacing: dp(8)
+        Label:
+            text: root.editeur + ("  •  " + root.date_txt if root.date_txt else "")
+            font_size: "11sp"
+            color: 0.62, 0.65, 0.70, 1
+            halign: "left"
+            text_size: self.size
+        Label:
+            markup: True
+            text: ("[color=4caf50]Positif[/color]" if root.sentiment == "positif" else "[color=e05555]Négatif[/color]" if root.sentiment == "negatif" else "[color=9fa3ab]Neutre[/color]")
+            font_size: "11sp"
+            halign: "right"
+            text_size: self.size
+            size_hint_x: 0.4
 
-<CardButton@ButtonBehavior+BoxLayout>:
+    BoxLayout:
+        size_hint_y: None
+        height: dp(18) if root.source else 0
+        Label:
+            text: root.source
+            font_size: "10sp"
+            color: 0.45, 0.48, 0.52, 1
+            halign: "left"
+            text_size: self.size
 
-<ClipBox@BoxLayout>:
+<PortfolioScreen>:
+    name: "portfolio"
     canvas.before:
-        StencilPush
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
         Rectangle:
             pos: self.pos
             size: self.size
-        StencilUse
-    canvas.after:
-        StencilUnUse
-        Rectangle:
-            pos: self.pos
-            size: self.size
-        StencilPop
+    BoxLayout:
+        orientation: "vertical"
 
-<PhotoBg@FloatLayout>:
-    Image:
-        source: 'assets/vineyard_bg.jpg'
-        allow_stretch: True
-        keep_ratio: False
-        size: self.parent.size
-        pos: self.parent.pos
-    Widget:
-        size: self.parent.size
-        pos: self.parent.pos
-        canvas:
-            Color:
-                rgba: 0.945, 0.914, 0.859, 0.86
-            Rectangle:
-                pos: self.pos
-                size: self.size
-
-<SplashScreen>:
-    FloatLayout:
-        size: root.size
-        pos: root.pos
-        Image:
-            source: 'assets/vineyard_bg.jpg'
-            allow_stretch: True
-            keep_ratio: False
-            size: root.size
-            pos: root.pos
-        Widget:
-            size: root.size
-            pos: root.pos
-            canvas:
+        BoxLayout:
+            size_hint_y: None
+            height: dp(72)
+            padding: dp(16), dp(10)
+            canvas.before:
                 Color:
-                    rgba: 0.13, 0.09, 0.04, 0.38
+                    rgba: 0.10, 0.11, 0.14, 1
                 Rectangle:
                     pos: self.pos
                     size: self.size
-        BoxLayout:
-            orientation: 'vertical'
-            size: root.size
-            pos: root.pos
-            padding: dp(24)
-            Widget:
-            Label:
-                text: 'Ma Cave'
-                font_size: dp(40)
-                bold: True
-                color: 1, 0.96, 0.9, 1
-                size_hint_y: None
-                height: dp(60)
-            Label:
-                text: 'Suivi de cave a vin'
-                font_size: dp(15)
-                color: 1, 0.96, 0.9, 0.85
-                size_hint_y: None
-                height: dp(24)
-            Widget:
-
-<RootScreen>:
-    PhotoBg:
-
-        BoxLayout:
-            orientation: 'vertical'
-            padding: dp(16)
-            spacing: dp(12)
-            size: root.size
-            pos: root.pos
-
             BoxLayout:
-                size_hint_y: None
-                height: dp(56)
+                orientation: "vertical"
                 Label:
-                    text: 'Ma Cave'
-                    font_size: dp(28)
+                    text: "Suivi Bourse"
                     bold: True
-                    color: 0.55, 0.33, 0.10, 1
-                    halign: 'left'
-                    valign: 'middle'
+                    font_size: "20sp"
+                    color: 0.95, 0.96, 0.97, 1
+                    halign: "left"
                     text_size: self.size
-                GhostButton:
-                    text: 'Cle API'
-                    size_hint_x: None
-                    width: dp(90)
-                    on_release: root.open_settings()
-                PrimaryButton:
-                    text: '+ Ajouter'
-                    size_hint_x: None
-                    width: dp(110)
-                    height: dp(40)
-                    on_release: root.open_add()
-
-            ScrollView:
-                do_scroll_x: False
-                BoxLayout:
-                    id: content
-                    orientation: 'vertical'
-                    size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(14)
-                    padding: [0, 0, 0, dp(80)]
-
-<FormScreen>:
-    PhotoBg:
+                    size_hint_y: 0.55
+                Label:
+                    text: root.total_txt + ("   ·   MàJ " + root.derniere_maj if root.derniere_maj else "")
+                    bold: True
+                    font_size: "14sp"
+                    color: root.total_color
+                    halign: "left"
+                    text_size: self.size
+                    size_hint_y: 0.45
 
         BoxLayout:
-            orientation: 'vertical'
-            padding: dp(16)
-            spacing: dp(12)
-            size: root.size
-            pos: root.pos
+            size_hint_y: None
+            height: dp(48)
+            padding: dp(10), dp(6)
+            spacing: dp(8)
+            PillButton:
+                text: "+ Ajouter"
+                on_release: root.manager.current = "add"
+            GhostButton:
+                text: "Rafraîchir"
+                disabled: root.refreshing
+                on_release: root.rafraichir()
+            GhostButton:
+                text: "Param."
+                size_hint_x: 0.3
+                on_release: root.manager.current = "settings"
 
+        Label:
+            text: root.erreur_globale
+            color: 0.95, 0.65, 0.25, 1
+            size_hint_y: None
+            height: dp(28) if root.erreur_globale else 0
+            font_size: "12sp"
+
+        ScrollView:
             BoxLayout:
+                id: liste_box
+                orientation: "vertical"
                 size_hint_y: None
-                height: dp(46)
-                GhostButton:
-                    text: '< Retour'
-                    size_hint_x: None
-                    width: dp(100)
-                    on_release: root.go_back()
+                height: self.minimum_height
+                padding: dp(10), dp(4)
+                spacing: dp(8)
 
-            ScrollView:
-                do_scroll_x: False
-                BoxLayout:
-                    id: form_content
-                    orientation: 'vertical'
+<AddPositionScreen>:
+    name: "add"
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: "vertical"
+        padding: dp(24)
+        spacing: dp(14)
+
+        Label:
+            text: "Nouvelle position"
+            font_size: "20sp"
+            bold: True
+            color: 0.95, 0.96, 0.97, 1
+            size_hint_y: None
+            height: dp(40)
+            halign: "left"
+            text_size: self.size
+
+        TextInput:
+            id: ticker_input
+            hint_text: "Ticker (ex: MC.PA, AAPL, TTE.PA)"
+            multiline: False
+            size_hint_y: None
+            height: dp(50)
+            background_color: 0.13, 0.145, 0.175, 1
+            foreground_color: 1, 1, 1, 1
+            hint_text_color: 0.55, 0.58, 0.62, 1
+            padding: dp(12), dp(14)
+
+        TextInput:
+            id: quantite_input
+            hint_text: "Quantité"
+            multiline: False
+            input_filter: "float"
+            size_hint_y: None
+            height: dp(50)
+            background_color: 0.13, 0.145, 0.175, 1
+            foreground_color: 1, 1, 1, 1
+            hint_text_color: 0.55, 0.58, 0.62, 1
+            padding: dp(12), dp(14)
+
+        TextInput:
+            id: pru_input
+            hint_text: "Prix de revient unitaire (PRU)"
+            multiline: False
+            input_filter: "float"
+            size_hint_y: None
+            height: dp(50)
+            background_color: 0.13, 0.145, 0.175, 1
+            foreground_color: 1, 1, 1, 1
+            hint_text_color: 0.55, 0.58, 0.62, 1
+            padding: dp(12), dp(14)
+
+        Label:
+            id: erreur_label
+            text: ""
+            color: 0.92, 0.38, 0.38, 1
+            size_hint_y: None
+            height: dp(26)
+            font_size: "12sp"
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(50)
+            spacing: dp(10)
+            GhostButton:
+                text: "Annuler"
+                on_release: root.annuler()
+            PillButton:
+                text: "Ajouter"
+                on_release: root.ajouter()
+
+        SectionLabel:
+            text: "OU"
+
+        Label:
+            id: import_statut_label
+            text: root.import_statut_txt
+            color: root.import_statut_color
+            size_hint_y: None
+            height: dp(26) if root.import_statut_txt else 0
+            font_size: "12sp"
+
+        GhostButton:
+            text: "⇩ Importer depuis Trading212"
+            size_hint_y: None
+            height: dp(50)
+            disabled: root.import_en_cours
+            on_release: root.importer_t212()
+
+        Widget:
+
+<DetailScreen>:
+    name: "detail"
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: "vertical"
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(64)
+            padding: dp(12), dp(10)
+            spacing: dp(8)
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.14, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            GhostButton:
+                text: "<"
+                size_hint_x: 0.15
+                on_release: root.manager.current = "portfolio"
+            Label:
+                text: root.nom
+                bold: True
+                font_size: "17sp"
+                color: 0.95, 0.96, 0.97, 1
+                halign: "left"
+                text_size: self.size
+            PillButton:
+                text: "Actus"
+                size_hint_x: 0.25
+                on_release: root.ouvrir_actualites()
+            GhostButton:
+                text: "Analystes"
+                size_hint_x: 0.3
+                on_release: root.ouvrir_analystes()
+
+        ScrollView:
+            BoxLayout:
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(16)
+                spacing: dp(10)
+
+                Label:
+                    text: root.resume_txt
+                    markup: True
                     size_hint_y: None
-                    height: self.minimum_height
-                    spacing: dp(8)
-                    padding: [0, 0, 0, dp(80)]
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: "left"
+                    color: 0.90, 0.92, 0.94, 1
+
+                Label:
+                    text: root.alertes_txt
+                    markup: True
+                    size_hint_y: None
+                    height: self.texture_size[1] if root.alertes_txt else 0
+                    text_size: self.width, None
+                    halign: "left"
+
+                SectionLabel:
+                    text: "ANALYSE TECHNIQUE"
+                    height: dp(26) if root.technique_txt else 0
+
+                Label:
+                    text: root.technique_txt
+                    markup: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: "left"
+                    color: 0.80, 0.83, 0.86, 1
+
+                SectionLabel:
+                    text: "POINTS CLÉS — SANTÉ FINANCIÈRE"
+                    height: dp(26) if root.notes_sante else 0
+
+                Label:
+                    text: root.notes_sante_txt
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: "left"
+                    color: 0.80, 0.83, 0.86, 1
+
+                SectionLabel:
+                    text: "POINTS CLÉS — FIABILITÉ DIVIDENDE"
+                    height: dp(26) if root.notes_div else 0
+
+                Label:
+                    text: root.notes_div_txt
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: "left"
+                    color: 0.80, 0.83, 0.86, 1
+
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(50)
+                    padding: 0, dp(10), 0, 0
+                    GhostButton:
+                        text: "Supprimer la position"
+                        color: 0.92, 0.38, 0.38, 1
+                        on_release: root.supprimer()
+
+<NewsScreen>:
+    name: "news"
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: "vertical"
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(64)
+            padding: dp(12), dp(10)
+            spacing: dp(8)
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.14, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            GhostButton:
+                text: "<"
+                size_hint_x: 0.15
+                on_release: root.manager.current = "detail"
+            Label:
+                text: "Actualités — " + root.nom
+                bold: True
+                font_size: "16sp"
+                color: 0.95, 0.96, 0.97, 1
+                halign: "left"
+                text_size: self.size
+
+        Label:
+            text: root.statut_txt
+            color: 0.62, 0.65, 0.70, 1
+            size_hint_y: None
+            height: dp(30) if root.statut_txt else 0
+            font_size: "12sp"
+
+        ScrollView:
+            BoxLayout:
+                id: news_box
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(10), dp(4)
+                spacing: dp(8)
+
+<AnalystesScreen>:
+    name: "analystes"
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: "vertical"
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(64)
+            padding: dp(12), dp(10)
+            spacing: dp(8)
+            canvas.before:
+                Color:
+                    rgba: 0.10, 0.11, 0.14, 1
+                Rectangle:
+                    pos: self.pos
+                    size: self.size
+            GhostButton:
+                text: "<"
+                size_hint_x: 0.15
+                on_release: root.manager.current = "detail"
+            Label:
+                text: "Analystes — " + root.nom
+                bold: True
+                font_size: "16sp"
+                color: 0.95, 0.96, 0.97, 1
+                halign: "left"
+                text_size: self.size
+
+        Label:
+            text: root.statut_txt
+            color: 0.62, 0.65, 0.70, 1
+            size_hint_y: None
+            height: dp(30) if root.statut_txt else 0
+            font_size: "12sp"
+
+        ScrollView:
+            BoxLayout:
+                orientation: "vertical"
+                size_hint_y: None
+                height: self.minimum_height
+                padding: dp(16)
+                spacing: dp(12)
+
+                Label:
+                    text: root.contenu_txt
+                    markup: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: "left"
+                    color: 0.90, 0.92, 0.94, 1
+
+                Label:
+                    text: root.source_txt
+                    font_size: "11sp"
+                    color: 0.45, 0.48, 0.52, 1
+                    size_hint_y: None
+                    height: self.texture_size[1] if root.source_txt else 0
+                    text_size: self.width, None
+                    halign: "left"
+
+<SettingsScreen>:
+    name: "settings"
+    canvas.before:
+        Color:
+            rgba: 0.07, 0.08, 0.10, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: "vertical"
+        padding: dp(24)
+        spacing: dp(14)
+
+        Label:
+            text: "Paramètres"
+            font_size: "20sp"
+            bold: True
+            color: 0.95, 0.96, 0.97, 1
+            size_hint_y: None
+            height: dp(40)
+            halign: "left"
+            text_size: self.size
+
+        SectionLabel:
+            text: "ADRESSE DU SERVEUR (server.py)"
+
+        TextInput:
+            id: url_input
+            hint_text: "http://192.168.1.X:8765"
+            multiline: False
+            size_hint_y: None
+            height: dp(50)
+            background_color: 0.13, 0.145, 0.175, 1
+            foreground_color: 1, 1, 1, 1
+            hint_text_color: 0.55, 0.58, 0.62, 1
+            padding: dp(12), dp(14)
+
+        Label:
+            id: statut_label
+            text: root.statut_txt
+            color: root.statut_color
+            size_hint_y: None
+            height: dp(30)
+            font_size: "13sp"
+
+        BoxLayout:
+            size_hint_y: None
+            height: dp(50)
+            spacing: dp(10)
+            GhostButton:
+                text: "Tester"
+                on_release: root.tester()
+            PillButton:
+                text: "Enregistrer"
+                on_release: root.enregistrer()
+
+        Label:
+            text:
+                ("Cette app ne fait tourner aucun calcul localement : elle "
+                "interroge un petit serveur (server.py) lancé sur ton PC, "
+                "ton VPS, ou Termux. Renseigne ici son adresse IP et son "
+                "port (8765 par défaut).")
+            size_hint_y: None
+            height: self.texture_size[1]
+            text_size: self.width, None
+            halign: "left"
+            font_size: "12sp"
+            color: 0.55, 0.58, 0.62, 1
+
+        Widget:
+
+        GhostButton:
+            text: "< Retour au portefeuille"
+            size_hint_y: None
+            height: dp(50)
+            on_release: root.manager.current = "portfolio"
 """
 
 
-class SplashScreen(Screen):
-    pass
+def couleur_pv(valeur):
+    if valeur is None:
+        return TXT_MUTED
+    if valeur > 0:
+        return GREEN
+    if valeur < 0:
+        return RED
+    return WHITE
 
 
-class RootScreen(Screen):
-    def open_settings(self):
-        App.get_running_app().show_settings_popup()
+class PortfolioScreen(Screen):
+    total_txt = StringProperty("")
+    total_color = ListProperty(list(WHITE))
+    refreshing = BooleanProperty(False)
+    erreur_globale = StringProperty("")
+    derniere_maj = StringProperty("")
 
-    def open_add(self):
-        App.get_running_app().open_add_form()
+    INTERVALLE_AUTO_REFRESH = 300  # secondes (5 minutes)
+    _auto_refresh_event = None
+
+    def on_pre_enter(self):
+        self.rafraichir()
+
+    def on_enter(self):
+        # Auto-rafraîchissement tant que cet écran est affiché ; annulé
+        # dans on_leave pour ne pas continuer à interroger le serveur en
+        # arrière-plan une fois qu'on a quitté l'écran portefeuille.
+        if self._auto_refresh_event is None:
+            self._auto_refresh_event = Clock.schedule_interval(
+                lambda dt: self.rafraichir(), self.INTERVALLE_AUTO_REFRESH
+            )
+
+    def on_leave(self):
+        if self._auto_refresh_event is not None:
+            self._auto_refresh_event.cancel()
+            self._auto_refresh_event = None
+
+    def rafraichir(self):
+        if self.refreshing:
+            return
+        positions = storage.charger_positions()
+        self.ids.liste_box.clear_widgets()
+        self._rows = []
+        self._total_pv = 0.0
+        self._total_connu = False
+        self._erreurs = 0
+
+        if not positions:
+            self.ids.liste_box.add_widget(
+                Label(text="Aucune position. Appuie sur + Ajouter.",
+                      size_hint_y=None, height=80, color=TXT_MUTED)
+            )
+            self.total_txt = ""
+            return
+
+        self.refreshing = True
+        self.erreur_globale = ""
+
+        for pos in positions:
+            row = Factory.PositionRow()
+            row.ticker = pos["ticker"]
+            row.nom = pos["ticker"]
+            row.pv_mv_txt = "…"
+            quantite = pos.get("quantite")
+            if quantite is not None:
+                # Affichage sans décimales inutiles si quantité entière
+                row.quantite_txt = f"{quantite:g}"
+            self.ids.liste_box.add_widget(row)
+            self._rows.append(row)
+
+        settings = storage.charger_settings()
+        server_url = settings.get("server_url", "")
+        threading.Thread(target=self._lancer_pool, args=(positions, server_url), daemon=True).start()
+
+    def _lancer_pool(self, positions, server_url):
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(api_client.analyser_position, server_url,
+                                 pos["ticker"], pos["quantite"], pos["pru"]): i
+                for i, pos in enumerate(positions)
+            }
+            for future in futures:
+                i = futures[future]
+                try:
+                    resultat = future.result()
+                except Exception as e:
+                    resultat = {"ticker": positions[i]["ticker"], "erreur": str(e)}
+                self._maj_ligne(i, resultat)
+        self._finaliser()
+
+    @mainthread
+    def _maj_ligne(self, index, r):
+        if index >= len(self._rows):
+            return
+        row = self._rows[index]
+        row.ticker = r.get("ticker", row.ticker)
+        row.nom = r.get("nom") or row.ticker
+
+        prix = r.get("prix_actuel")
+        devise = r.get("devise") or ""
+        row.prix_txt = f"{prix:.2f} {devise}".strip() if prix is not None else ""
+
+        if r.get("erreur"):
+            err = r["erreur"] or ""
+            if "injoignable" in err or "timeout" in err.lower():
+                self._erreurs += 1
+            row.pv_mv_txt = "Erreur"
+            row.pv_mv_color = ORANGE
+            row.accent_color = ORANGE
+        elif r.get("pv_mv_eur") is not None:
+            self._total_pv += r["pv_mv_eur"]
+            self._total_connu = True
+            signe = "+" if r["pv_mv_eur"] >= 0 else ""
+            pct = r.get("pv_mv_pct")
+            pct_txt = f" ({signe}{pct:.1f}%)" if pct is not None else ""
+            row.pv_mv_txt = f"{signe}{r['pv_mv_eur']:.2f}{pct_txt}"
+            row.pv_mv_color = couleur_pv(r["pv_mv_eur"])
+            row.accent_color = couleur_pv(r["pv_mv_eur"])
+        else:
+            row.pv_mv_txt = "N/A"
+
+        row.sante_txt = f"{r['note_sante']}" if r.get("note_sante") is not None else "N/A"
+        row.div_txt = f"{r['note_div']}" if r.get("note_div") is not None else "N/A"
+        row.verdict = r.get("verdict", "")
+        row.a_des_alertes = bool(r.get("alertes"))
+
+        row.bind(on_touch_up=lambda inst, touch, res=r:
+                  self._ouvrir_detail(res) if inst.collide_point(*touch.pos) else None)
+
+        self.total_txt = (f"PV/MV totale: {'+' if self._total_pv >= 0 else ''}{self._total_pv:.2f} €"
+                           if self._total_connu else "")
+        self.total_color = list(couleur_pv(self._total_pv if self._total_connu else None))
+
+    @mainthread
+    def _finaliser(self):
+        self.refreshing = False
+        if self._erreurs and self._erreurs == len(self._rows):
+            settings = storage.charger_settings()
+            self.erreur_globale = f"Serveur injoignable à {settings.get('server_url', '')} — vérifie Paramètres."
+        else:
+            self.erreur_globale = ""
+        self.derniere_maj = datetime.now().strftime("%H:%M")
+
+    def _ouvrir_detail(self, resultat):
+        detail = self.manager.get_screen("detail")
+        detail.charger(resultat)
+        self.manager.transition = SlideTransition(direction="left")
+        self.manager.current = "detail"
 
 
-class FormScreen(Screen):
-    def go_back(self):
-        App.get_running_app().cancel_form()
+class AddPositionScreen(Screen):
+    import_statut_txt = StringProperty("")
+    import_statut_color = ListProperty(list(WHITE))
+    import_en_cours = BooleanProperty(False)
+
+    def annuler(self):
+        self.ids.ticker_input.text = ""
+        self.ids.quantite_input.text = ""
+        self.ids.pru_input.text = ""
+        self.ids.erreur_label.text = ""
+        self.manager.current = "portfolio"
+
+    def ajouter(self):
+        ticker = self.ids.ticker_input.text.strip()
+        quantite = self.ids.quantite_input.text.strip()
+        pru = self.ids.pru_input.text.strip()
+
+        if not ticker or not quantite or not pru:
+            self.ids.erreur_label.text = "Tous les champs sont obligatoires."
+            return
+        try:
+            quantite_f = float(quantite)
+            pru_f = float(pru)
+            if quantite_f <= 0 or pru_f <= 0:
+                raise ValueError
+        except ValueError:
+            self.ids.erreur_label.text = "Quantité et PRU doivent être des nombres positifs."
+            return
+
+        storage.ajouter_position(ticker, quantite_f, pru_f,
+                                  date_achat=datetime.now().strftime("%Y-%m-%d"))
+        self.ids.ticker_input.text = ""
+        self.ids.quantite_input.text = ""
+        self.ids.pru_input.text = ""
+        self.ids.erreur_label.text = ""
+        self.manager.current = "portfolio"
+
+    def importer_t212(self):
+        self.import_en_cours = True
+        self.import_statut_txt = "Import en cours..."
+        self.import_statut_color = list(WHITE)
+        threading.Thread(target=self._importer_t212_en_fond, daemon=True).start()
+
+    def _importer_t212_en_fond(self):
+        settings = storage.charger_settings()
+        server_url = settings.get("server_url", "")
+        positions, erreur = api_client.obtenir_portefeuille_t212(server_url)
+        self._traiter_import(positions, erreur)
+
+    @mainthread
+    def _traiter_import(self, positions, erreur):
+        self.import_en_cours = False
+        if erreur:
+            self.import_statut_txt = f"Échec : {erreur}"
+            self.import_statut_color = list(RED)
+            return
+        if not positions:
+            self.import_statut_txt = "Aucune position trouvée sur Trading212."
+            self.import_statut_color = list(ORANGE)
+            return
+
+        existantes = {p["ticker"].upper() for p in storage.charger_positions()}
+        ajoutees = 0
+        non_resolus = []
+        for p in positions:
+            ticker = p.get("ticker", "").strip().upper()
+            if not ticker or ticker in existantes:
+                continue
+            try:
+                storage.ajouter_position(ticker, p["quantite"], p["pru"],
+                                          date_achat=datetime.now().strftime("%Y-%m-%d"))
+                ajoutees += 1
+                existantes.add(ticker)
+                # Si le ticker importé est identique au ticker T212 brut,
+                # c'est que la conversion (générique + ISIN) a échoué.
+                if ticker == p.get("ticker_t212_origine", "").upper():
+                    non_resolus.append(ticker)
+            except Exception:
+                continue
+
+        message = f"{ajoutees} position(s) importée(s) sur {len(positions)} trouvée(s)."
+        if non_resolus:
+            message += (f" ! {len(non_resolus)} ticker(s) non résolu(s), à corriger "
+                        f"manuellement : {', '.join(non_resolus)}")
+            self.import_statut_color = list(ORANGE)
+        else:
+            self.import_statut_color = list(GREEN)
+        self.import_statut_txt = message
 
 
 class DetailScreen(Screen):
-    def show_bottle(self, bottle):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.floatlayout import FloatLayout
-        from kivy.uix.scrollview import ScrollView
-        from kivy.uix.label import Label
-        from kivy.uix.image import Image as KivyImage
-        from kivy.factory import Factory
+    nom = StringProperty("")
+    ticker = StringProperty("")
+    resume_txt = StringProperty("")
+    notes_sante = ListProperty([])
+    notes_div = ListProperty([])
+    notes_sante_txt = StringProperty("")
+    notes_div_txt = StringProperty("")
+    technique_txt = StringProperty("")
+    analystes_txt = StringProperty("")
+    alertes_txt = StringProperty("")
+    _resultat = None
 
-        self.current_bottle = bottle
-        self.clear_widgets()
-        status, status_label = compute_status(bottle)
+    def charger(self, resultat):
+        self._resultat = resultat
+        self.nom = resultat.get("nom") or resultat.get("ticker", "")
+        self.ticker = resultat.get("ticker", "")
+        r = resultat
 
-        outer_bg = FloatLayout()
-        bg_img = KivyImage(source='assets/vineyard_bg.jpg', allow_stretch=True, keep_ratio=False,
-                            size=outer_bg.size, pos=outer_bg.pos)
-        outer_bg.bind(size=lambda w, v: setattr(bg_img, "size", v),
-                       pos=lambda w, v: setattr(bg_img, "pos", v))
-        outer_bg.add_widget(bg_img)
-        overlay = Widget(size=outer_bg.size, pos=outer_bg.pos)
-        with overlay.canvas:
-            Color(0.945, 0.914, 0.859, 0.86)
-            overlay_rect = Rectangle(pos=overlay.pos, size=overlay.size)
-        overlay.bind(pos=lambda w, v: setattr(overlay_rect, "pos", v),
-                     size=lambda w, v: setattr(overlay_rect, "size", v))
-        outer_bg.bind(size=lambda w, v: setattr(overlay, "size", v),
-                      pos=lambda w, v: setattr(overlay, "pos", v))
-        outer_bg.add_widget(overlay)
+        lignes = [f"[b]{r.get('nom')}[/b] ({r.get('ticker')})", ""]
+        if r.get("erreur"):
+            lignes.append(f"[color=e04c4c]Erreur: {r['erreur']}[/color]")
+        else:
+            positions_locales = storage.charger_positions()
+            quantite_detenue = None
+            for p in positions_locales:
+                if p["ticker"].upper() == r.get("ticker", "").upper():
+                    quantite_detenue = p.get("quantite")
+                    break
+            if quantite_detenue is not None:
+                lignes.append(f"Quantité détenue : {quantite_detenue:g} actions")
 
-        root = BoxLayout(orientation="vertical")
-        outer_bg.add_widget(root)
-        outer_bg.bind(size=lambda w, v: setattr(root, "size", v),
-                      pos=lambda w, v: setattr(root, "pos", v))
+            prix = r.get("prix_actuel")
+            devise = r.get("devise") or ""
+            lignes.append(f"Prix actuel : {prix:.2f} {devise}" if prix is not None else "Prix actuel : N/A")
+            if r.get("valeur_position") is not None:
+                lignes.append(f"Valeur position : {r['valeur_position']:.2f} {devise}")
+            if r.get("pv_mv_eur") is not None:
+                signe = "+" if r["pv_mv_eur"] >= 0 else ""
+                pct = r.get("pv_mv_pct")
+                pct_txt = f" ({signe}{pct:.1f}%)" if pct is not None else ""
+                couleur = "5ecc66" if r["pv_mv_eur"] >= 0 else "e04c4c"
+                lignes.append(f"[color={couleur}]PV/MV : {signe}{r['pv_mv_eur']:.2f} {devise}{pct_txt}[/color]")
+            lignes.append("")
+            if r.get("prochain_dividende_date"):
+                lignes.append(f"Prochain détachement (ex-div) : {r['prochain_dividende_date']}")
+            if r.get("prochain_dividende_montant"):
+                lignes.append(f"Dividende annuel estimé : {r['prochain_dividende_montant']:.2f} / action")
+            if r.get("rendement_pct") is not None:
+                lignes.append(f"Rendement actuel : {r['rendement_pct']:.2f}%")
+            lignes.append("")
+            note_s = r.get("note_sante")
+            note_d = r.get("note_div")
+            lignes.append(f"Note santé financière : {note_s}/10" if note_s is not None else "Note santé financière : N/A")
+            lignes.append(f"Note fiabilité dividende : {note_d}/10" if note_d is not None else "Note fiabilité dividende : N/A")
+            lignes.append(f"Verdict : {r.get('verdict', '')}")
 
-        top_bar = BoxLayout(size_hint_y=None, height=dp(50), padding=[dp(8), 0], spacing=dp(6))
-        back_btn = Factory.GhostButton(text="< Retour", size_hint_x=None, width=dp(90))
-        back_btn.bind(on_release=lambda *_: setattr(App.get_running_app().sm, "current", "root"))
-        top_bar.add_widget(back_btn)
-        edit_btn = Factory.GhostButton(text="Modifier", size_hint_x=None, width=dp(90))
-        edit_btn.bind(on_release=lambda *_: App.get_running_app().start_edit(bottle))
-        top_bar.add_widget(edit_btn)
-        share_btn = Factory.GhostButton(text="Partager")
-        share_btn.bind(on_release=lambda *_: share_bottle(bottle))
-        top_bar.add_widget(share_btn)
-        root.add_widget(top_bar)
+        self.resume_txt = "\n".join(lignes)
+        self.notes_sante = r.get("notes_sante", [])
+        self.notes_div = r.get("notes_div", [])
+        self.notes_sante_txt = "\n".join(f"• {n}" for n in self.notes_sante) or "Données insuffisantes."
+        self.notes_div_txt = "\n".join(f"• {n}" for n in self.notes_div) or "Données insuffisantes."
 
-        scroll = ScrollView(do_scroll_x=False)
-        content = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
-                             padding=[dp(16), 0, dp(16), dp(30)])
-        content.bind(minimum_height=content.setter("height"))
+        # --- Analyse technique (SMA50/SMA200, volume) ---
+        lignes_tech = []
+        sma50 = r.get("sma50")
+        sma200 = r.get("sma200")
+        if sma50 is not None:
+            lignes_tech.append(f"Moyenne mobile 50j : {sma50:.2f}")
+        if sma200 is not None:
+            lignes_tech.append(f"Moyenne mobile 200j : {sma200:.2f}")
+        au_dessus = r.get("au_dessus_sma200")
+        if au_dessus is not None:
+            couleur = "5ecc66" if au_dessus else "e04c4c"
+            position = "au-dessus" if au_dessus else "en-dessous"
+            lignes_tech.append(f"[color={couleur}]Cours actuellement {position} de sa SMA200[/color]")
+        croisement = r.get("sma50_au_dessus_sma200")
+        if croisement is not None:
+            couleur = "5ecc66" if croisement else "e04c4c"
+            etat = "SMA50 au-dessus de la SMA200 (config. haussière)" if croisement else "SMA50 en-dessous de la SMA200 (config. baissière)"
+            lignes_tech.append(f"[color={couleur}]{etat}[/color]")
+        ratio_vol = r.get("ratio_volume")
+        if ratio_vol is not None:
+            lignes_tech.append(f"Volume vs moyenne : x{ratio_vol:.1f}")
+        self.technique_txt = "\n".join(lignes_tech)
 
-        photo_row = BoxLayout(size_hint_y=None, height=dp(200), spacing=dp(8))
-        has_any_photo = False
-        for key in ("photo_path", "photo_path_back"):
-            p = bottle.get(key)
-            if p and os.path.exists(p):
-                has_any_photo = True
-                clip = Factory.ClipBox()
-                img = KivyImage(source=p, allow_stretch=True, keep_ratio=True)
-                clip.add_widget(img)
-                photo_row.add_widget(clip)
-        if has_any_photo:
-            content.add_widget(photo_row)
+        # --- Alertes actives ---
+        alertes = r.get("alertes", [])
+        if alertes:
+            lignes_alertes = ["[b][color=f2a63f]! ALERTES ACTIVES[/color][/b]"]
+            for a in alertes:
+                lignes_alertes.append(f"[color=f2a63f]• {a.get('message', '')}[/color]")
+            self.alertes_txt = "\n".join(lignes_alertes)
+        else:
+            self.alertes_txt = ""
 
-        name_lbl = Label(text=bottle.get("nom", "?"), bold=True, font_size=dp(24),
-                          color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(36),
-                          halign="left", valign="middle")
-        name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(name_lbl)
+    def ouvrir_actualites(self):
+        news_screen = self.manager.get_screen("news")
+        news_screen.charger(self.ticker, self.nom)
+        self.manager.transition = SlideTransition(direction="left")
+        self.manager.current = "news"
 
-        sub_lbl = Label(text=f'{bottle.get("appellation","")}  ·  {bottle.get("region","")}',
-                         font_size=dp(14), color=(0.17, 0.13, 0.11, 0.7), size_hint_y=None,
-                         height=dp(22), halign="left", valign="middle")
-        sub_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(sub_lbl)
+    def ouvrir_analystes(self):
+        analystes_screen = self.manager.get_screen("analystes")
+        analystes_screen.charger(self.ticker, self.nom, self._resultat.get("devise") if self._resultat else "")
+        self.manager.transition = SlideTransition(direction="left")
+        self.manager.current = "analystes"
 
-        chip_row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(8))
-        wtype = bottle.get("type") or "Autre"
-        type_chip = Label(text=wtype, size_hint_x=None, width=dp(80), font_size=dp(12),
-                           bold=True, color=(1, 1, 1, 1))
-        with type_chip.canvas.before:
-            Color(*TYPE_COLORS.get(wtype, (0.5, 0.5, 0.5, 1)))
-            chip_rect = Rectangle(pos=type_chip.pos, size=type_chip.size)
-        type_chip.bind(pos=lambda w, v: setattr(chip_rect, "pos", v),
-                        size=lambda w, v: setattr(chip_rect, "size", v))
-        chip_row.add_widget(type_chip)
-        chip_row.add_widget(Label(text=bottle.get("cepage", ""), font_size=dp(13),
-                                   color=(0.17, 0.13, 0.11, 0.85)))
-        content.add_widget(chip_row)
-
-        millesime_lbl = Label(text=f'Millesime {bottle.get("millesime","?")}', font_size=dp(16),
-                               color=(0.55, 0.33, 0.10, 1), bold=True, size_hint_y=None,
-                               height=dp(26), halign="left", valign="middle")
-        millesime_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(millesime_lbl)
-
-        status_lbl = Label(text=status_label, font_size=dp(15), bold=True,
-                            color=STATUS_COLORS[status], size_hint_y=None, height=dp(26),
-                            halign="left", valign="middle")
-        status_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(status_lbl)
-
-        price_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(20))
-        if bottle.get("prix_paye"):
-            box = BoxLayout(orientation="vertical")
-            box.add_widget(Label(text=f'{bottle["prix_paye"]} EUR', bold=True, font_size=dp(20),
-                                  color=(0.55, 0.33, 0.10, 1)))
-            box.add_widget(Label(text="Paye", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
-            price_row.add_widget(box)
-        if bottle.get("prix_estime"):
-            box = BoxLayout(orientation="vertical")
-            box.add_widget(Label(text=f'{bottle["prix_estime"]} EUR', bold=True, font_size=dp(20),
-                                  color=(0.69, 0.54, 0.31, 1)))
-            box.add_widget(Label(text="Estime (marche)", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
-            price_row.add_widget(box)
-        benefice = compute_benefice(bottle)
-        if benefice is not None:
-            sign = "+" if benefice >= 0 else ""
-            bcolor = (0.31, 0.35, 0.25, 1) if benefice >= 0 else (0.66, 0.36, 0.23, 1)
-            box = BoxLayout(orientation="vertical")
-            box.add_widget(Label(text=f'{sign}{benefice:g} EUR', bold=True, font_size=dp(20),
-                                  color=bcolor))
-            box.add_widget(Label(text="Plus-value", font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6)))
-            price_row.add_widget(box)
-        content.add_widget(price_row)
-
-        if bottle.get("note_ia"):
-            note_title = Label(text="Note du sommelier", bold=True, font_size=dp(14),
-                                color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(24),
-                                halign="left", valign="middle")
-            note_title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-            content.add_widget(note_title)
-            note_lbl = Label(text=bottle["note_ia"], font_size=dp(13),
-                              color=(0.17, 0.13, 0.11, 0.85), size_hint_y=None,
-                              halign="left", valign="top")
-            note_lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
-            note_lbl.bind(texture_size=lambda w, v: setattr(w, "height", v[1]))
-            content.add_widget(note_lbl)
-
-        scroll.add_widget(content)
-        root.add_widget(scroll)
-        self.add_widget(outer_bg)
+    def supprimer(self):
+        if self._resultat:
+            positions = storage.charger_positions()
+            ticker = self._resultat.get("ticker")
+            for i, p in enumerate(positions):
+                if p["ticker"] == ticker:
+                    storage.supprimer_position(i)
+                    break
+        self.manager.current = "portfolio"
 
 
-class WineApp(App):
+class NewsScreen(Screen):
+    nom = StringProperty("")
+    statut_txt = StringProperty("")
+    _ticker = None
+
+    def charger(self, ticker, nom):
+        self._ticker = ticker
+        self.nom = nom
+        self.ids.news_box.clear_widgets()
+        self.statut_txt = "Chargement des actualités..."
+        threading.Thread(target=self._charger_en_fond, args=(ticker,), daemon=True).start()
+
+    def _charger_en_fond(self, ticker):
+        settings = storage.charger_settings()
+        server_url = settings.get("server_url", "")
+        actus = api_client.obtenir_actualites(server_url, ticker)
+        self._afficher(actus)
+
+    @mainthread
+    def _afficher(self, actus):
+        self.ids.news_box.clear_widgets()
+        if not actus:
+            self.statut_txt = "Aucune actualité trouvée (ou serveur injoignable)."
+            return
+        self.statut_txt = ""
+        for item in actus:
+            row = Factory.NewsRow()
+            row.titre = item.get("titre", "")
+            row.editeur = item.get("editeur", "")
+            row.date_txt = item.get("date", "")
+            row.sentiment = item.get("sentiment", "neutre")
+            row.lien = item.get("lien", "")
+            row.alerte = bool(item.get("alerte", False))
+            row.source = item.get("source", "")
+            if row.lien:
+                row.bind(on_touch_up=lambda inst, touch, url=row.lien:
+                          webbrowser.open(url) if inst.collide_point(*touch.pos) else None)
+            self.ids.news_box.add_widget(row)
+
+
+class AnalystesScreen(Screen):
+    nom = StringProperty("")
+    statut_txt = StringProperty("")
+    contenu_txt = StringProperty("")
+    source_txt = StringProperty("")
+    _ticker = None
+    _devise = ""
+
+    def charger(self, ticker, nom, devise=""):
+        self._ticker = ticker
+        self._devise = devise or ""
+        self.nom = nom
+        self.contenu_txt = ""
+        self.statut_txt = "Chargement des avis analystes..."
+        threading.Thread(target=self._charger_en_fond, args=(ticker,), daemon=True).start()
+
+    def _charger_en_fond(self, ticker):
+        settings = storage.charger_settings()
+        server_url = settings.get("server_url", "")
+        avis = api_client.obtenir_avis_analystes(server_url, ticker)
+        self._afficher(avis)
+
+    @mainthread
+    def _afficher(self, avis):
+        if not avis:
+            self.statut_txt = "Aucun avis analyste disponible pour ce titre."
+            self.contenu_txt = ""
+            self.source_txt = ""
+            return
+
+        self.statut_txt = ""
+        lignes = []
+
+        # Cas Finnhub : répartition détaillée des recommandations
+        if avis.get("strong_buy") is not None:
+            total = avis.get("nb_analystes") or 0
+            lignes.append(f"[b]{total} analyste(s)[/b]" + (f" — période {avis['periode']}" if avis.get("periode") else ""))
+            lignes.append("")
+            lignes.append(f"[color=4caf50]Achat fort[/color] : {avis.get('strong_buy', 0)}")
+            lignes.append(f"[color=4caf50]Achat[/color] : {avis.get('buy', 0)}")
+            lignes.append(f"[color=9fa3ab]Conserver[/color] : {avis.get('hold', 0)}")
+            lignes.append(f"[color=e05555]Vente[/color] : {avis.get('sell', 0)}")
+            lignes.append(f"[color=e05555]Vente forte[/color] : {avis.get('strong_sell', 0)}")
+        # Cas repli yfinance : juste un consensus global
+        elif avis.get("consensus"):
+            lignes.append(f"Consensus : [b]{avis['consensus']}[/b]"
+                           + (f" ({avis['nb_analystes']} analystes)" if avis.get("nb_analystes") else ""))
+
+        prix_cible = avis.get("prix_cible_moyen")
+        if prix_cible:
+            lignes.append("")
+            ligne_cible = f"Objectif de cours moyen : [b]{prix_cible:.2f} {self._devise}[/b]"
+            if avis.get("prix_cible_bas") and avis.get("prix_cible_haut"):
+                ligne_cible += f"\n(entre {avis['prix_cible_bas']:.2f} et {avis['prix_cible_haut']:.2f})"
+            lignes.append(ligne_cible)
+
+        self.contenu_txt = "\n".join(lignes) if lignes else "Données incomplètes."
+        self.source_txt = f"Source : {avis.get('source', 'inconnue')}"
+
+
+class SettingsScreen(Screen):
+    statut_txt = StringProperty("")
+    statut_color = ListProperty(list(WHITE))
+
+    def on_pre_enter(self):
+        settings = storage.charger_settings()
+        self.ids.url_input.text = settings.get("server_url", "")
+        self.statut_txt = ""
+
+    def tester(self):
+        url = self.ids.url_input.text.strip()
+        self.statut_txt = "Test en cours..."
+        self.statut_color = list(WHITE)
+        threading.Thread(target=self._tester_en_fond, args=(url,), daemon=True).start()
+
+    def _tester_en_fond(self, url):
+        ok, message = api_client.tester_connexion(url)
+        self._afficher_statut(ok, message)
+
+    @mainthread
+    def _afficher_statut(self, ok, message):
+        self.statut_txt = message
+        self.statut_color = list(GREEN) if ok else list(RED)
+
+    def enregistrer(self):
+        url = self.ids.url_input.text.strip()
+        if url:
+            storage.set_server_url(url)
+            self.statut_txt = "Enregistré."
+            self.statut_color = list(GREEN)
+
+
+class SuiviBourseApp(App):
+    # Écran parent de chaque écran, pour que le bouton retour Android
+    # remonte dans la hiérarchie de navigation au lieu de fermer l'app.
+    # Un écran absent de cette table (ex: "portfolio", l'écran racine)
+    # laisse le comportement par défaut d'Android s'exécuter (fermer l'app).
+    _ECRAN_PARENT = {
+        "add": "portfolio",
+        "settings": "portfolio",
+        "detail": "portfolio",
+        "news": "detail",
+        "analystes": "detail",
+    }
+
     def build(self):
-        self.title = "Ma Cave"
-        self.bottles = load_bottles()
-        self.settings = load_settings()
-        self.pending_photo = None
-        self.pending_photo_back = None
-        self._pending_note_ia = ""
-        self.analysis_result = None
-        self.editing_bottle = None
-        self.search_query = ""
-        self.sort_mode = "Statut"
-
-        self._request_android_permissions()
-
         Builder.load_string(KV)
-        self.splash_screen = SplashScreen(name="splash")
-        self.root_screen = RootScreen(name="root")
-        self.detail_screen = DetailScreen(name="detail")
-        self.form_screen = FormScreen(name="form")
         sm = ScreenManager()
-        self.sm = sm
-        sm.add_widget(self.splash_screen)
-        sm.add_widget(self.root_screen)
-        sm.add_widget(self.detail_screen)
-        sm.add_widget(self.form_screen)
-        self.build_content()
-        Clock.schedule_once(lambda dt: setattr(self.sm, "current", "root"), 1.8)
+        sm.add_widget(PortfolioScreen())
+        sm.add_widget(AddPositionScreen())
+        sm.add_widget(DetailScreen())
+        sm.add_widget(NewsScreen())
+        sm.add_widget(AnalystesScreen())
+        sm.add_widget(SettingsScreen())
+        Window.bind(on_keyboard=self._on_keyboard)
         return sm
 
-    def _request_android_permissions(self):
-        try:
-            from android.permissions import request_permissions, Permission
-            perms = []
-            for name in ("CAMERA", "READ_MEDIA_IMAGES", "WRITE_EXTERNAL_STORAGE",
-                         "READ_EXTERNAL_STORAGE"):
-                p = getattr(Permission, name, None)
-                if p:
-                    perms.append(p)
-            request_permissions(perms)
-        except Exception as e:
-            print(f"Permissions non demandees (normal hors Android) : {e}")
-
-    # -- root screen (list only) --------------------------------
-    def build_content(self):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.factory import Factory
-
-        content = self.root_screen.ids.content
-        content.clear_widgets()
-
-        if self.bottles:
-            content.add_widget(self.build_stats_bar())
-
-        search_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        search_input = Factory.StyledInput(hint_text="Rechercher (nom, cepage, region)...",
-                                            text=self.search_query)
-        search_input.bind(text=lambda w, v: self._on_search_change(v))
-        search_row.add_widget(search_input)
-        sort_spinner = Spinner(text=self.sort_mode, values=["Statut", "Nom", "Prix", "Millesime"],
-                                size_hint_x=None, width=dp(110), background_color=(1, 1, 1, 1),
-                                color=(0.17, 0.13, 0.11, 1))
-        sort_spinner.bind(text=lambda w, v: self._on_sort_change(v))
-        search_row.add_widget(sort_spinner)
-        content.add_widget(search_row)
-
-        section = Label(text=f"La cave ({len(self.bottles)})", bold=True, font_size=dp(20),
-                         color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(30),
-                         halign="left", valign="middle")
-        section.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(section)
-
-        self.list_container = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(14))
-        self.list_container.bind(minimum_height=self.list_container.setter("height"))
-        content.add_widget(self.list_container)
-
-        self.refresh_list()
-
-    # -- form screen (add / edit) --------------------------------
-    def build_form_content(self):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.factory import Factory
-
-        content = self.form_screen.ids.form_content
-        content.clear_widgets()
-
-        add_card = Factory.RoundCard(orientation="vertical", size_hint_y=None,
-                                      padding=dp(14), spacing=dp(8))
-        add_card.bind(minimum_height=add_card.setter('height'))
-
-        title_text = "Modifier la bouteille" if self.editing_bottle else "Ajouter une bouteille"
-        title = Label(text=title_text, bold=True, font_size=dp(19),
-                       color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(30),
-                       halign="left", valign="middle")
-        title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        add_card.add_widget(title)
-
-        side_row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
-        side_row.add_widget(Label(text="Etiquette :", font_size=dp(12), size_hint_x=None,
-                                   width=dp(70), color=(0.17, 0.13, 0.11, 0.7)))
-        self.photo_side_spinner = Spinner(text="Recto", values=["Recto", "Verso"],
-                                           size_hint_y=None, height=dp(36),
-                                           background_color=(1, 1, 1, 1),
-                                           color=(0.17, 0.13, 0.11, 1))
-        side_row.add_widget(self.photo_side_spinner)
-        add_card.add_widget(side_row)
-
-        photo_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        camera_btn = Factory.PrimaryButton(text="Prendre une photo")
-        camera_btn.bind(on_release=lambda *_: self.take_photo())
-        photo_row.add_widget(camera_btn)
-        gallery_btn = Factory.PrimaryButton(text="Galerie")
-        gallery_btn.size_hint_x = 0.45
-        gallery_btn.bind(on_release=lambda *_: self.pick_photo())
-        photo_row.add_widget(gallery_btn)
-        add_card.add_widget(photo_row)
-
-        self.photo_status_label = Label(text=self._photo_status_text(), size_hint_y=None,
-                                         height=dp(40), font_size=dp(13), bold=True,
-                                         color=(0.55, 0.33, 0.10, 1), halign="left", valign="top")
-        self.photo_status_label.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
-        self.photo_status_label.bind(texture_size=lambda w, v: setattr(w, "height", max(dp(20), v[1])))
-        add_card.add_widget(self.photo_status_label)
-
-        analyze_btn = None
-        if self.editing_bottle:
-            analyze_btn = Factory.PrimaryButton(text="Analyser l'etiquette")
-            analyze_btn.bind(on_release=lambda *_: self.analyze_photo())
-            add_card.add_widget(analyze_btn)
-
-        type_label = Label(text="Type de vin", font_size=dp(12), color=(0.55, 0.33, 0.10, 0.7),
-                            size_hint_y=None, height=dp(18), halign="left", valign="middle")
-        type_label.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        add_card.add_widget(type_label)
-        self.type_spinner = Spinner(text="Rouge", values=TYPE_OPTIONS, size_hint_y=None,
-                                     height=dp(44), background_color=(1, 1, 1, 1),
-                                     color=(0.17, 0.13, 0.11, 1))
-        add_card.add_widget(self.type_spinner)
-
-        show_preview = (not self.editing_bottle) and self.analysis_result
-
-        self.inputs = {}
-        if show_preview:
-            preview_box = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(3))
-            preview_box.bind(minimum_height=preview_box.setter("height"))
-            self.build_analysis_preview(preview_box)
-            add_card.add_widget(preview_box)
-
-            prix_paye_input = Factory.StyledInput(hint_text="Prix paye (EUR)")
-            self.inputs["prix_paye"] = prix_paye_input
-            add_card.add_widget(prix_paye_input)
-        else:
-            for key, hint in [
-                ("nom", "Nom du vin / domaine"),
-                ("appellation", "Appellation"),
-                ("millesime", "Millesime"),
-                ("cepage", "Cepage"),
-                ("region", "Region"),
-                ("garde_min", "Garde min (ans)"),
-                ("garde_max", "Garde max (ans)"),
-                ("prix_paye", "Prix paye (EUR)"),
-                ("prix_estime", "Prix estime (EUR)"),
-            ]:
-                ti = Factory.StyledInput(hint_text=hint)
-                self.inputs[key] = ti
-                add_card.add_widget(ti)
-
-        save_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        save_text = "Enregistrer les modifications" if self.editing_bottle else "Ajouter a la cave"
-        add_btn = Factory.PrimaryButton(text=save_text)
-        add_btn.bind(on_release=lambda *_: self.add_bottle())
-        save_row.add_widget(add_btn)
-        cancel_btn = Factory.PrimaryButton(text="Annuler")
-        cancel_btn.size_hint_x = 0.35
-        cancel_btn.bind(on_release=lambda *_: self.cancel_form())
-        save_row.add_widget(cancel_btn)
-        add_card.add_widget(save_row)
-
-        content.add_widget(add_card)
-
-        if self.editing_bottle:
-            for key, ti in self.inputs.items():
-                ti.text = str(self.editing_bottle.get(key, "") or "")
-            self.type_spinner.text = self.editing_bottle.get("type", "Rouge")
-
-    def build_analysis_preview(self, container):
-        from kivy.uix.label import Label
-
-        a = self.analysis_result
-
-        def row(label_text, value):
-            if not value:
-                return
-            lbl = Label(text=f"{label_text} : {value}", font_size=dp(13),
-                        color=(0.17, 0.13, 0.11, 0.85), size_hint_y=None, height=dp(22),
-                        halign="left", valign="middle")
-            lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-            container.add_widget(lbl)
-
-        name_lbl = Label(text=str(a.get("nom") or "?"), bold=True, font_size=dp(18),
-                          color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(28),
-                          halign="left", valign="middle")
-        name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        container.add_widget(name_lbl)
-
-        row("Appellation", a.get("appellation"))
-        row("Millesime", a.get("millesime"))
-        row("Cepage", a.get("cepage"))
-        row("Region", a.get("region"))
-        if a.get("garde_min") or a.get("garde_max"):
-            row("Garde", f'{a.get("garde_min") or "?"}-{a.get("garde_max") or "?"} ans')
-        if a.get("prix_estime"):
-            row("Prix estime", f'{a["prix_estime"]} EUR')
-
-        if a.get("note_ia"):
-            note_lbl = Label(text=str(a["note_ia"]), font_size=dp(12),
-                              color=(0.17, 0.13, 0.11, 0.7), size_hint_y=None,
-                              halign="left", valign="top")
-            note_lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
-            note_lbl.bind(texture_size=lambda w, v: setattr(w, "height", v[1]))
-            container.add_widget(note_lbl)
-
-    def _photo_status_text(self):
-        front = "pret" if self.pending_photo and os.path.exists(self.pending_photo) else "manquant"
-        back = "pret" if self.pending_photo_back and os.path.exists(self.pending_photo_back) else "aucun"
-        return f"Recto: {front}  ·  Verso: {back}"
-
-    def _on_search_change(self, value):
-        self.search_query = value
-        self.refresh_list()
-
-    def _on_sort_change(self, value):
-        self.sort_mode = value
-        self.refresh_list()
-
-    def refresh_list(self):
-        from kivy.uix.label import Label
-
-        self.list_container.clear_widgets()
-        filtered = [b for b in self.bottles if matches_search(b, self.search_query)]
-        ordered = sort_bottles(filtered, self.sort_mode)
-
-        if not self.bottles:
-            empty = Label(text="Aucune bouteille pour l'instant.", size_hint_y=None,
-                           height=dp(60), color=(0.55, 0.33, 0.10, 0.6))
-            self.list_container.add_widget(empty)
-            return
-
-        if not ordered:
-            empty = Label(text="Aucun resultat pour cette recherche.", size_hint_y=None,
-                           height=dp(60), color=(0.55, 0.33, 0.10, 0.6))
-            self.list_container.add_widget(empty)
-            return
-
-        for bottle in ordered:
-            self.list_container.add_widget(self.build_bottle_card(bottle))
-
-    def build_stats_bar(self):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.factory import Factory
-
-        top_cepages = compute_top_terms(self.bottles, "cepage", 3)
-        top_regions = compute_top_terms(self.bottles, "region", 3)
-        extra_lines = 0
-        if top_cepages:
-            extra_lines += 1
-        if top_regions:
-            extra_lines += 1
-
-        card = Factory.RoundCard(orientation="vertical", size_hint_y=None,
-                                  height=dp(90) + extra_lines * dp(20),
-                                  padding=dp(12), spacing=dp(4))
-        title = Label(text="Profil de la cave", bold=True, font_size=dp(14),
-                      color=(0.55, 0.33, 0.10, 1), size_hint_y=None, height=dp(20),
-                      halign="left", valign="middle")
-        title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        card.add_widget(title)
-
-        breakdown = compute_type_breakdown(self.bottles)
-        bar_row = BoxLayout(size_hint_y=None, height=dp(16), spacing=dp(2))
-        for t, count, pct in breakdown:
-            seg = Widget()
-            seg.size_hint_x = max(pct, 4) / 100
-            with seg.canvas:
-                Color(*TYPE_COLORS.get(t, (0.5, 0.5, 0.5, 1)))
-                rect = Rectangle(pos=seg.pos, size=seg.size)
-            seg.bind(pos=lambda w, v, r=rect: setattr(r, "pos", v),
-                     size=lambda w, v, r=rect: setattr(r, "size", v))
-            bar_row.add_widget(seg)
-        card.add_widget(bar_row)
-
-        legend = BoxLayout(size_hint_y=None, height=dp(20), spacing=dp(10))
-        for t, count, pct in breakdown[:4]:
-            legend.add_widget(Label(text=f"{t} {pct}%", font_size=dp(11),
-                                     color=(0.17, 0.13, 0.11, 0.8)))
-        card.add_widget(legend)
-
-        if top_cepages:
-            txt = "Cepages favoris : " + ", ".join(f"{t} ({c})" for t, c in top_cepages)
-            lbl = Label(text=txt, font_size=dp(11), color=(0.17, 0.13, 0.11, 0.75),
-                        size_hint_y=None, height=dp(20), halign="left", valign="middle")
-            lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-            card.add_widget(lbl)
-
-        if top_regions:
-            txt = "Regions favorites : " + ", ".join(f"{t} ({c})" for t, c in top_regions)
-            lbl = Label(text=txt, font_size=dp(11), color=(0.17, 0.13, 0.11, 0.75),
-                        size_hint_y=None, height=dp(20), halign="left", valign="middle")
-            lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-            card.add_widget(lbl)
-
-        return card
-
-    def build_bottle_card(self, bottle):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.uix.image import Image as KivyImage
-        from kivy.factory import Factory
-
-        status, status_label = compute_status(bottle)
-        has_photo = bottle.get("photo_path") and os.path.exists(bottle["photo_path"])
-
-        outer = Factory.CardButton(orientation="horizontal", size_hint_y=None, height=dp(86))
-        outer.bind(on_release=lambda *_: self.open_detail(bottle))
-
-        card = Factory.RoundCard(orientation="horizontal", padding=dp(10), spacing=dp(10))
-
-        thumb = Factory.ClipBox(size_hint_x=None, width=dp(64))
-        if has_photo:
-            img = KivyImage(source=bottle["photo_path"], allow_stretch=True, keep_ratio=True)
-            thumb.add_widget(img)
-        else:
-            ph_color = TYPE_COLORS.get(bottle.get("type") or "Autre", (0.6, 0.6, 0.6, 1))
-            with thumb.canvas.before:
-                Color(*ph_color)
-                ph_rect = Rectangle(pos=thumb.pos, size=thumb.size)
-            thumb.bind(pos=lambda w, v: setattr(ph_rect, "pos", v),
-                       size=lambda w, v: setattr(ph_rect, "size", v))
-        card.add_widget(thumb)
-
-        info = BoxLayout(orientation="vertical", spacing=dp(3))
-
-        top_row = BoxLayout(size_hint_y=None, height=dp(22))
-        name_lbl = Label(text=bottle.get("nom", "?"), font_size=dp(15), bold=True,
-                          color=(0.17, 0.13, 0.11, 1), halign="left", valign="middle",
-                          shorten=True, shorten_from="right")
-        name_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        top_row.add_widget(name_lbl)
-        year_lbl = Label(text=bottle.get("millesime", "") or "-", font_size=dp(15), bold=True,
-                          color=(0.55, 0.33, 0.10, 1), size_hint_x=None, width=dp(46),
-                          halign="right", valign="middle")
-        year_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        top_row.add_widget(year_lbl)
-        del_btn = Factory.GhostButton(text="X", size_hint_x=None, width=dp(28), height=dp(22),
-                                       font_size=dp(12))
-        del_btn.bind(on_release=lambda *_: self.remove_bottle(bottle))
-        top_row.add_widget(del_btn)
-        info.add_widget(top_row)
-
-        meta = f'{bottle.get("appellation","")}  ·  {bottle.get("cepage","")}'
-        meta_lbl = Label(text=meta, font_size=dp(11.5), color=(0.17, 0.13, 0.11, 0.65),
-                          size_hint_y=None, height=dp(16), halign="left", valign="middle",
-                          shorten=True, shorten_from="right")
-        meta_lbl.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        info.add_widget(meta_lbl)
-
-        bottom_row = BoxLayout(size_hint_y=None, height=dp(24), spacing=dp(6))
-
-        badge = Label(text=STATUS_SHORT[status], font_size=dp(10.5), bold=True,
-                      color=(1, 1, 1, 1), size_hint=(None, None), size=(dp(72), dp(20)))
-        with badge.canvas.before:
-            Color(*STATUS_COLORS[status])
-            badge_rect = RoundedRectangle(pos=badge.pos, size=badge.size, radius=[dp(10)])
-        badge.bind(pos=lambda w, v: setattr(badge_rect, "pos", v),
-                   size=lambda w, v: setattr(badge_rect, "size", v))
-        bottom_row.add_widget(badge)
-
-        bottom_row.add_widget(BoxLayout())  # spacer
-
-        benefice = compute_benefice(bottle)
-        if benefice is not None:
-            sign = "+" if benefice >= 0 else ""
-            color = (0.31, 0.35, 0.25, 1) if benefice >= 0 else (0.66, 0.36, 0.23, 1)
-            price_txt = f"{sign}{benefice:g} EUR"
-        elif bottle.get("prix_estime"):
-            color = (0.17, 0.13, 0.11, 0.8)
-            price_txt = f'{bottle["prix_estime"]} EUR (estime)'
-        elif bottle.get("prix_paye"):
-            color = (0.17, 0.13, 0.11, 0.8)
-            price_txt = f'{bottle["prix_paye"]} EUR (paye)'
-        else:
-            color = (0.17, 0.13, 0.11, 0.4)
-            price_txt = ""
-        price_lbl = Label(text=price_txt, font_size=dp(13), bold=True, color=color,
-                           size_hint_x=None, halign="right", valign="middle")
-        price_lbl.bind(texture_size=lambda w, v: setattr(w, "width", v[0]))
-        bottom_row.add_widget(price_lbl)
-
-        info.add_widget(bottom_row)
-        card.add_widget(info)
-        outer.add_widget(card)
-        return outer
-
-    def open_detail(self, bottle):
-        self.detail_screen.show_bottle(bottle)
-        self.sm.current = "detail"
-
-    def open_add_form(self):
-        self._reset_form_state()
-        self.build_form_content()
-        self.sm.current = "form"
-
-    def start_edit(self, bottle):
-        self.editing_bottle = bottle
-        self.analysis_result = None
-        self.build_form_content()
-        self.pending_photo = bottle.get("photo_path")
-        self.pending_photo_back = bottle.get("photo_path_back")
-        self._pending_note_ia = bottle.get("note_ia", "")
-        self.photo_status_label.text = self._photo_status_text()
-        self.sm.current = "form"
-
-    def cancel_form(self):
-        self._reset_form_state()
-        self.sm.current = "root"
-
-    # -- photo picking / analysis -------------------------------------
-    def take_photo(self):
-        self.photo_status_label.text = "Ouverture de l'appareil photo..."
-        target = TEMP_PHOTO_BACK if self.photo_side_spinner.text == "Verso" else TEMP_PHOTO_FRONT
-
-        def on_captured(path):
-            if self.photo_side_spinner.text == "Verso":
-                self.pending_photo_back = path
-            else:
-                self.pending_photo = path
-            self.photo_status_label.text = self._photo_status_text()
-            self.photo_status_label.color = (0.55, 0.33, 0.10, 1)
-            if self.editing_bottle is None and self.pending_photo:
-                self.analyze_photo()
-
-        def on_error(msg):
-            self.photo_status_label.text = msg
-            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
-
-        open_camera(target, on_captured, on_error)
-
-    def pick_photo(self):
-        self.photo_status_label.text = "Ouverture de la galerie..."
-        target = TEMP_PHOTO_BACK if self.photo_side_spinner.text == "Verso" else TEMP_PHOTO_FRONT
-
-        def on_picked(path):
-            if self.photo_side_spinner.text == "Verso":
-                self.pending_photo_back = path
-            else:
-                self.pending_photo = path
-            self.photo_status_label.text = self._photo_status_text()
-            self.photo_status_label.color = (0.55, 0.33, 0.10, 1)
-            if self.editing_bottle is None and self.pending_photo:
-                self.analyze_photo()
-
-        def on_error(msg):
-            self.photo_status_label.text = msg
-            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
-
-        pick_image_from_gallery(target, on_picked, on_error)
-
-    def analyze_photo(self):
-        if not self.pending_photo:
-            self.photo_status_label.text = "Choisissez d'abord une photo recto."
-            return
-        api_key = self.settings.get("api_key", "").strip()
-        if not api_key:
-            self.photo_status_label.text = "Ajoutez votre cle API (bouton en haut a droite)."
-            return
-
-        self.photo_status_label.text = "Analyse en cours..."
-
-        def on_success(parsed):
-            if self.editing_bottle is not None:
-                self.photo_status_label.text = "Analyse terminee."
-                mapping = ["nom", "appellation", "millesime", "cepage", "region",
-                           "garde_min", "garde_max", "prix_estime"]
-                for key in mapping:
-                    val = parsed.get(key)
-                    if val not in (None, ""):
-                        self.inputs[key].text = str(val)
-                self._pending_note_ia = parsed.get("note_ia", "")
-                return
-
-            meaningful = any(str(parsed.get(k) or "").strip()
-                              for k in ("nom", "appellation", "millesime", "cepage"))
-            if meaningful:
-                self.photo_status_label.text = "Analyse terminee."
-                self.analysis_result = parsed
-                self.build_form_content()
-            else:
-                self.photo_status_label.text = "Analyse peu concluante, completez manuellement."
-                self.photo_status_label.color = (0.69, 0.54, 0.31, 1)
-                mapping = ["nom", "appellation", "millesime", "cepage", "region",
-                           "garde_min", "garde_max", "prix_estime"]
-                for key in mapping:
-                    val = parsed.get(key)
-                    if val not in (None, "") and key in self.inputs:
-                        self.inputs[key].text = str(val)
-                self._pending_note_ia = parsed.get("note_ia", "")
-
-        def on_error(msg):
-            self.photo_status_label.text = msg
-            self.photo_status_label.color = (0.75, 0.15, 0.1, 1)
-
-        analyze_label([self.pending_photo, self.pending_photo_back], api_key, on_success, on_error)
-
-    # -- persistence helpers ---------------------------------------
-    def _persist_photo(self, pending_path, suffix):
-        if not pending_path or not os.path.exists(pending_path):
-            return None
-        if os.path.dirname(pending_path) == PHOTOS_DIR:
-            return pending_path  # unchanged during edit
-        permanent_path = os.path.join(PHOTOS_DIR, f"bottle_{int(time.time()*1000)}_{suffix}.jpg")
-        try:
-            with open(pending_path, "rb") as src, open(permanent_path, "wb") as dst:
-                dst.write(src.read())
-            return permanent_path
-        except Exception:
-            return None
-
-    def _reset_form_state(self):
-        self.pending_photo = None
-        self.pending_photo_back = None
-        self._pending_note_ia = ""
-        self.analysis_result = None
-        self.editing_bottle = None
-
-    # -- CRUD -----------------------------------------------------------
-    def add_bottle(self):
-        using_preview = (not self.editing_bottle) and self.analysis_result
-
-        if using_preview:
-            a = self.analysis_result
-            nom = str(a.get("nom") or "").strip()
-            if not nom:
-                self.photo_status_label.text = "Analyse incomplete : nom manquant, saisissez-le."
-                return
-            bottle = {
-                "nom": nom,
-                "appellation": str(a.get("appellation") or ""),
-                "millesime": str(a.get("millesime") or ""),
-                "cepage": str(a.get("cepage") or ""),
-                "region": str(a.get("region") or ""),
-                "garde_min": str(a.get("garde_min") or ""),
-                "garde_max": str(a.get("garde_max") or ""),
-                "prix_estime": str(a.get("prix_estime") or ""),
-                "prix_paye": self.inputs["prix_paye"].text.strip(),
-            }
-            bottle["note_ia"] = a.get("note_ia", "")
-        else:
-            nom = self.inputs["nom"].text.strip()
-            if not nom:
-                self.photo_status_label.text = "Indiquez au moins un nom de vin."
-                return
-            bottle = {k: ti.text.strip() for k, ti in self.inputs.items()}
-            bottle["note_ia"] = self._pending_note_ia
-
-        bottle["type"] = self.type_spinner.text
-
-        front_path = self._persist_photo(self.pending_photo, "front")
-        if front_path:
-            bottle["photo_path"] = front_path
-        elif self.editing_bottle:
-            bottle["photo_path"] = self.editing_bottle.get("photo_path")
-
-        back_path = self._persist_photo(self.pending_photo_back, "back")
-        if back_path:
-            bottle["photo_path_back"] = back_path
-        elif self.editing_bottle:
-            bottle["photo_path_back"] = self.editing_bottle.get("photo_path_back")
-
-        if self.editing_bottle is not None:
-            idx = self.bottles.index(self.editing_bottle)
-            self.bottles[idx] = bottle
-        else:
-            self.bottles.insert(0, bottle)
-
-        save_bottles(self.bottles)
-        self._reset_form_state()
-        self.sm.current = "root"
-        self.build_content()
-
-    def remove_bottle(self, bottle):
-        for key in ("photo_path", "photo_path_back"):
-            p = bottle.get(key)
-            if p and os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception:
-                    pass
-        self.bottles.remove(bottle)
-        save_bottles(self.bottles)
-        self.build_content()
-
-    # -- settings popup ---------------------------------------------
-    def show_settings_popup(self):
-        from kivy.uix.boxlayout import BoxLayout
-        from kivy.uix.label import Label
-        from kivy.factory import Factory
-
-        box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(14))
-        box.add_widget(Label(text="Cle API Gemini (gratuite)", size_hint_y=None, height=dp(24),
-                              color=(0.17, 0.13, 0.11, 1)))
-        key_input = Factory.StyledInput(text=self.settings.get("api_key", ""), password=True)
-        box.add_widget(key_input)
-        info = Label(text="Obtenue gratuitement sur aistudio.google.com/apikey. Stockee uniquement sur ce telephone.",
-                     font_size=dp(11), color=(0.17, 0.13, 0.11, 0.6), size_hint_y=None, height=dp(50))
-        box.add_widget(info)
-
-        test_status = Label(text="", font_size=dp(12), color=(0.17, 0.13, 0.11, 0.8),
-                             size_hint_y=None, height=dp(30))
-        box.add_widget(test_status)
-
-        btn_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        test_btn = Factory.PrimaryButton(text="Tester la cle")
-        save_btn = Factory.PrimaryButton(text="Enregistrer")
-        btn_row.add_widget(test_btn)
-        btn_row.add_widget(save_btn)
-        box.add_widget(btn_row)
-
-        popup = Popup(title="Parametres", content=box, size_hint=(0.9, 0.55))
-
-        def do_test(*_):
-            key = key_input.text.strip()
-            if not key:
-                test_status.text = "Entrez d'abord une cle."
-                return
-            test_status.text = "Test en cours..."
-
-            def on_success():
-                test_status.text = "Cle valide, connexion OK."
-                test_status.color = (0.31, 0.35, 0.25, 1)
-
-            def on_error(msg):
-                test_status.text = msg
-                test_status.color = (0.66, 0.36, 0.23, 1)
-
-            test_api_key(key, on_success, on_error)
-
-        def do_save(*_):
-            self.settings["api_key"] = key_input.text.strip()
-            save_settings(self.settings)
-            popup.dismiss()
-
-        test_btn.bind(on_release=do_test)
-        save_btn.bind(on_release=do_save)
-        popup.open()
+    def _on_keyboard(self, window, key, *args):
+        # keycode 27 = touche "retour" Android (mappée sur Escape par Kivy)
+        if key == 27:
+            ecran_actuel = self.root.current
+            ecran_parent = self._ECRAN_PARENT.get(ecran_actuel)
+            if ecran_parent:
+                self.root.transition = SlideTransition(direction="right")
+                self.root.current = ecran_parent
+                return True  # événement consommé : on ne ferme pas l'app
+            return False  # sur l'écran racine : comportement Android normal (quitter)
+        return False
 
 
 if __name__ == "__main__":
-    Window.clearcolor = (0.945, 0.914, 0.859, 1)
-    WineApp().run()
+    SuiviBourseApp().run()
