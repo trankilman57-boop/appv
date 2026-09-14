@@ -14,7 +14,7 @@ import certifi
 from kivy.app import App
 from kivy.lang import Builder
 from kivy.clock import mainthread, Clock
-from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
+from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.popup import Popup
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.spinner import Spinner
@@ -264,17 +264,25 @@ def pick_image_from_gallery(temp_path, on_picked, on_error):
                 return
             try:
                 if intent is None:
-                    on_error("Aucune image sélectionnée.")
+                    on_error_mainthread("Aucune image sélectionnée.")
                     return
                 uri = intent.getData()
                 if uri is None:
-                    on_error("Aucune image sélectionnée.")
+                    on_error_mainthread("Aucune image sélectionnée.")
                     return
                 _save_uri_to_file(uri, temp_path)
                 activity.unbind(on_activity_result=on_activity_result)
-                on_picked(temp_path)
+                on_picked_mainthread(temp_path)
             except Exception as e:
-                on_error(f"Erreur lecture image : {e}")
+                on_error_mainthread(f"Erreur lecture image : {e}")
+
+        @mainthread
+        def on_picked_mainthread(path):
+            on_picked(path)
+
+        @mainthread
+        def on_error_mainthread(msg):
+            on_error(msg)
 
         activity.bind(on_activity_result=on_activity_result)
         intent = Intent(Intent.ACTION_GET_CONTENT)
@@ -880,7 +888,6 @@ class WineApp(App):
         self.detail_screen = DetailScreen(name="detail")
 
         sm = ScreenManager()
-        sm.transition = NoTransition()
         self.sm = sm
 
         from kivy.uix.boxlayout import BoxLayout
@@ -1011,10 +1018,10 @@ class WineApp(App):
                 item.bind(on_release=lambda *_: setattr(self.sm, "current", screen_name))
             return item
 
-        bar.add_widget(make_item("⌂", "Accueil", "home"))
-        bar.add_widget(make_item("▤", "Ma cave", "cave"))
-        bar.add_widget(make_item("◎", "Scanner", "scan", is_scan=True))
-        bar.add_widget(make_item("◐", "Profil", "profil"))
+        bar.add_widget(make_item("Acc.", "Accueil", "home"))
+        bar.add_widget(make_item("Cave", "Ma cave", "cave"))
+        bar.add_widget(make_item("+", "Scanner", "scan", is_scan=True))
+        bar.add_widget(make_item("Moi", "Profil", "profil"))
 
         self.tab_bar_container.add_widget(bar)
 
@@ -1326,12 +1333,6 @@ class WineApp(App):
                        size_hint_y=None, height=dp(32), halign="left", valign="middle")
         title.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
         content.add_widget(title)
-
-        subtitle = Label(text="Prenez une photo, l'IA identifie le vin et estime sa garde.",
-                          font_size=dp(12.5), color=TEXT_MUTED, size_hint_y=None, height=dp(18),
-                          halign="left", valign="middle")
-        subtitle.bind(size=lambda w, *_: setattr(w, "text_size", w.size))
-        content.add_widget(subtitle)
 
         photo_card = Factory.RoundCard(orientation="vertical", size_hint_y=None,
                                         padding=dp(14), spacing=dp(10))
@@ -1735,7 +1736,7 @@ class WineApp(App):
             on_press=self.show_settings_popup))
         settings_card.add_widget(setting_row("Unite de prix", "EUR", TEXT_MUTED))
         settings_card.add_widget(setting_row(
-            "Exporter la cave", "›", ACCENT,
+            "Exporter la cave", ">", ACCENT,
             on_press=lambda: share_text("Exporter Ma Cave", export_cave_text(self.bottles))))
 
         content.add_widget(settings_card)
