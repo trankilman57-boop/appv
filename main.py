@@ -26,8 +26,8 @@ from kivy.core.window import Window
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_DIR, "cave.json")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
-TEMP_PHOTO_FRONT = os.path.join(APP_DIR, "temp_label_front.jpg")
-TEMP_PHOTO_BACK = os.path.join(APP_DIR, "temp_label_back.jpg")
+def _new_temp_photo_path(suffix):
+    return os.path.join(APP_DIR, f"temp_label_{suffix}_{int(time.time()*1000)}.jpg")
 PHOTOS_DIR = os.path.join(APP_DIR, "photos")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
@@ -1032,8 +1032,13 @@ class WineApp(App):
                         Rectangle(pos=(x + s * 0.34, y + s * 0.7), size=(s * 0.32, s * 0.14))
                         Line(circle=(x + s * 0.5, y + s * 0.43, s * 0.16), width=dp(1.6))
                     elif kind == "person":
-                        Line(circle=(x + s * 0.5, y + s * 0.72, s * 0.15), width=dp(1.6))
-                        Line(circle=(x + s * 0.5, y + s * 0.18, s * 0.34, 20, 160), width=dp(1.6))
+                        Line(circle=(x + s * 0.5, y + s * 0.7, s * 0.16), width=dp(1.6))
+                        Line(points=[
+                            x + s * 0.18, y + s * 0.06,
+                            x + s * 0.82, y + s * 0.06,
+                            x + s * 0.66, y + s * 0.42,
+                            x + s * 0.34, y + s * 0.42,
+                        ], width=dp(1.6), close=True, joint="round")
 
             w.bind(pos=redraw, size=redraw)
             redraw()
@@ -1598,7 +1603,7 @@ class WineApp(App):
     # -- photo picking / analysis -------------------------------------
     def take_photo(self):
         self.photo_status_label.text = "Ouverture de l'appareil photo..."
-        target = TEMP_PHOTO_BACK if self.photo_side == "Verso" else TEMP_PHOTO_FRONT
+        target = _new_temp_photo_path("back" if self.photo_side == "Verso" else "front")
 
         def on_captured(path):
             if self.photo_side == "Verso":
@@ -1616,7 +1621,7 @@ class WineApp(App):
 
     def pick_photo(self):
         self.photo_status_label.text = "Ouverture de la galerie..."
-        target = TEMP_PHOTO_BACK if self.photo_side == "Verso" else TEMP_PHOTO_FRONT
+        target = _new_temp_photo_path("back" if self.photo_side == "Verso" else "front")
 
         def on_picked(path):
             if self.photo_side == "Verso":
